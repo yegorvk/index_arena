@@ -36,13 +36,13 @@
 //! struct Odd<A> {
 //!     next: Option<Id<Even<A>, A>>,
 //! }
-//! 
+//!
 //! let mut arena = new_arena!();
-//! 
+//!
 //! let three = arena.alloc(Odd { next: None });
 //! let two = arena.alloc(Even { next: Some(three) });
 //! let one = arena.alloc(Odd { next: Some(two) });
-//! 
+//!
 //! assert_eq!(&arena[one].next, &Some(two));
 //! ```
 
@@ -52,6 +52,7 @@ use core::mem::MaybeUninit;
 use core::ptr;
 use core::ptr::NonNull;
 use std::ops::{Index, IndexMut};
+
 use aligned_vec::{AVec, ConstAlign};
 use derive_where::derive_where;
 
@@ -292,6 +293,7 @@ impl<T, A> Index<Id<T, A>> for Arena<A> {
 }
 
 impl<T, A> IndexMut<Id<T, A>> for Arena<A> {
+    #[inline]
     fn index_mut(&mut self, id: Id<T, A>) -> &mut Self::Output {
         self.get_mut(id)
     }

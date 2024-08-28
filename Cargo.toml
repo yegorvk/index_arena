@@ -1,7 +1,14 @@
 [package]
 name = "index_arena"
 version = "0.1.0"
+authors = ["Yegor Vaskonyan <yegor.vaskonyan@gmail.com>"]
 edition = "2021"
+rust-version = "1.80.0"
+description = "A simple, id-based, heterogeneous arena allocator"
+repository = "https://github.com/yegorvk/index_arena"
+license = "MIT OR Apache-2.0"
+keywords = ["arena", "allocator"]
+categories = ["memory-management", "rust-patterns"]
 
 [dependencies]
 derive-where = "1.2.7"

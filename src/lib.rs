@@ -1,3 +1,6 @@
+// Copyright (c) [2024] [Yegor Vaskonyan]
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! A simple, id-based, heterogeneous arena allocator.
 //!
 //! ## Id-based

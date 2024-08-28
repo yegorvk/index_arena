@@ -1,0 +1,8 @@
+[package]
+name = "index_arena"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+derive-where = "1.2.7"
+aligned-vec = "0.6.1"

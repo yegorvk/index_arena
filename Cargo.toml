@@ -9,6 +9,7 @@ repository = "https://github.com/yegorvk/index_arena"
 license = "MIT OR Apache-2.0"
 keywords = ["arena", "allocator"]
 categories = ["memory-management", "rust-patterns"]
+exclude = [".idea"]
 
 [dependencies]
 derive-where = "1.2.7"

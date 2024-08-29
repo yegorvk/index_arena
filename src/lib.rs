@@ -73,6 +73,12 @@ macro_rules! assert_const {
     };
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[repr(transparent)]
+pub struct RawId {
+    byte_offset: u32,
+}
+
 /// A unique identifier for an object allocated using `Arena`.
 ///
 /// `Id<T, A>` can only be used with the specific arena from which it was created,
@@ -86,19 +92,38 @@ macro_rules! assert_const {
 #[derive_where(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 #[repr(transparent)]
 pub struct Id<T, A> {
-    // Invariant: `byte_offset` always represents a valid location
+    // Invariant: `raw_id.byte_offset` always represents a valid location
     // within the arena holding a value of type `T`, provided `size_of::<T>() > 0`.
-    byte_offset: u32,
+    raw_id: RawId,
     _marker: PhantomData<(fn() -> T, A)>,
 }
 
 impl<T, A> Id<T, A> {
     #[inline]
-    unsafe fn from_offset(byte_offset: usize) -> Id<T, A> {
+    unsafe fn new(byte_offset: usize) -> Id<T, A> {
         let byte_offset = byte_offset.try_into()
             .expect("`byte_offset` must not exceed `u32::MAX`");
 
-        Id { byte_offset, _marker: PhantomData }
+        Id { raw_id: RawId { byte_offset }, _marker: PhantomData }
+    }
+
+    /// Creates a new `Id<T, S>` from the given `RawId`.
+    /// 
+    /// # Safety
+    /// `raw_id` must have been created from an `Id<T, A>` with the same `T` and `A`.
+    #[inline]
+    pub unsafe fn from_raw(raw_id: RawId) -> Id<T, A> {
+        Id { raw_id, _marker: PhantomData }
+    }
+
+    #[inline]
+    pub fn as_raw(&self) -> &RawId {
+        &self.raw_id
+    }
+
+    #[inline]
+    pub fn into_raw(self) -> RawId {
+        self.raw_id
     }
 }
 
@@ -110,7 +135,7 @@ impl<T, A> Id<MaybeUninit<T>, A> {
     /// The caller must ensure the value is fully initialized before calling this method.
     #[inline]
     unsafe fn assume_init(self) -> Id<T, A> {
-        Id { byte_offset: self.byte_offset, _marker: PhantomData }
+        Id { raw_id: self.raw_id, _marker: PhantomData }
     }
 }
 
@@ -171,9 +196,9 @@ impl<A, const MAX_ALIGN: usize> Arena<A, MAX_ALIGN> {
     fn get_ptr<T>(&self, id: Id<T, A>) -> NonNull<T> {
         assert_const!(size_of::<T>() != 0 && align_of::<T>() <= MAX_ALIGN);
 
-        // SAFETY: `id.byte_offset` points to a valid object of type `T`.
+        // SAFETY: `id.raw_id.byte_offset` points to a valid object of type `T`.
         let ptr = unsafe {
-            let raw_ptr = self.storage.as_ptr().add(id.byte_offset as usize);
+            let raw_ptr = self.storage.as_ptr().add(id.raw_id.byte_offset as usize);
             raw_ptr as *const T
         };
 
@@ -229,7 +254,7 @@ impl<A, const MAX_ALIGN: usize> Arena<A, MAX_ALIGN> {
         // SAFETY: the memory location at `byte_offset` is properly
         // aligned to hold a value of type `T` and `MaybeUninit`
         // does not require initialization.
-        let id: Id<MaybeUninit<T>, A> = unsafe { Id::from_offset(byte_offset) };
+        let id: Id<MaybeUninit<T>, A> = unsafe { Id::new(byte_offset) };
 
         id
     }

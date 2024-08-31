@@ -1,6 +1,6 @@
 [package]
 name = "index_arena"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Yegor Vaskonyan <yegor.vaskonyan@gmail.com>"]
 edition = "2021"
 rust-version = "1.80.0"

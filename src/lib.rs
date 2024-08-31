@@ -49,15 +49,23 @@
 //! assert_eq!(&arena[one].next, &Some(two));
 //! ```
 
+#![allow(private_bounds)]
+
 use core::alloc::Layout;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::ptr;
-use core::ptr::NonNull;
+use std::fmt::Debug;
+use std::hash::Hash;
 use std::ops::{Index, IndexMut};
+use std::slice::{from_raw_parts, from_raw_parts_mut};
 
 use aligned_vec::{AVec, ConstAlign};
 use derive_where::derive_where;
+
+use crate::utils::MaybeUninitExt;
+
+mod utils;
 
 macro_rules! assert_const {
     ($cond:expr, $($arg:tt)+) => {
@@ -73,10 +81,162 @@ macro_rules! assert_const {
     };
 }
 
+const MAX_ALIGN: usize = 128;
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 #[repr(transparent)]
 pub struct RawId {
     byte_offset: u32,
+}
+
+/// `Id` specialization for statically sized types.
+///
+/// All the guarantees `Id` makes also apply for this type.
+#[derive_where(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[repr(transparent)]
+struct SizedId<T, A> {
+    // Invariant: `byte_offset` always represents a valid location
+    // within the arena holding a value of type `T`, provided `size_of::<T>() > 0`.
+    byte_offset: u32,
+    _marker: PhantomData<(T, A)>,
+}
+
+impl<T, A> SizedId<T, A> {
+    #[inline]
+    unsafe fn new(byte_offset: usize) -> SizedId<T, A> {
+        let byte_offset: u32 = byte_offset.try_into()
+            .expect("`byte_offset` must not exceed `u32::MAX`");
+
+        SizedId { byte_offset, _marker: PhantomData }
+    }
+}
+
+impl<T, A> SizedId<MaybeUninit<T>, A> {
+    /// Converts this `SizedId<MaybeUninit<T>, A>` to `SizedId<T, A>`,
+    /// assuming the associated value is initialized.
+    ///
+    /// # Safety
+    /// The caller must ensure the value is fully initialized before calling this method.
+    #[inline]
+    unsafe fn assume_init(self) -> SizedId<T, A> {
+        SizedId { byte_offset: self.byte_offset, _marker: PhantomData }
+    }
+}
+
+#[derive_where(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+struct SliceId<T, A> {
+    byte_offset: u32,
+    len: u32,
+    _marker: PhantomData<(T, A)>,
+}
+
+impl<T, A> SliceId<T, A> {
+    #[inline]
+    unsafe fn new(byte_offset: usize, len: usize) -> SliceId<T, A> {
+        let byte_offset: u32 = byte_offset.try_into()
+            .expect("`byte_offset` must not exceed `u32::MAX`");
+
+        let len: u32 = len.try_into()
+            .expect("`len` must not exceed `u32::MAX`");
+
+        SliceId { byte_offset, len, _marker: PhantomData }
+    }
+}
+
+impl<T, A> SliceId<MaybeUninit<T>, A> {
+    /// Converts this `SliceId<MaybeUninit<T>, A>` to `SliceId<T, A>`,
+    /// assuming the associated value is initialized.
+    ///
+    /// # Safety
+    /// The caller must ensure all slice elements are fully
+    /// initialized before calling this method.
+    #[inline]
+    unsafe fn assume_init(self) -> SliceId<T, A> {
+        SliceId { byte_offset: self.byte_offset, len: self.len, _marker: PhantomData }
+    }
+}
+
+/// Describes an `Id` specialization.
+///
+/// # Safety
+/// Implementors must uphold all the guarantees `Id` makes.
+unsafe trait SpecId<A> {
+    type Id: Debug + Copy + Clone + Eq + PartialEq + Hash;
+
+    fn get(arena: &Arena<A>, id: Self::Id) -> &Self;
+
+    fn get_mut(arena: &mut Arena<A>, id: Self::Id) -> &mut Self;
+
+    fn get_raw_id(id: Self::Id) -> RawId;
+}
+
+unsafe impl<T, A> SpecId<A> for T {
+    type Id = SizedId<T, A>;
+
+    #[inline]
+    fn get(arena: &Arena<A>, id: Self::Id) -> &Self {
+        assert_const!(size_of::<T>() != 0 && align_of::<T>() <= MAX_ALIGN);
+
+        let byte_offset = id.byte_offset as usize;
+
+        let ptr = unsafe {
+            let raw_ptr = arena.storage.as_ptr().add(byte_offset);
+            raw_ptr.cast()
+        };
+
+        unsafe { &*ptr }
+    }
+
+    #[inline]
+    fn get_mut(arena: &mut Arena<A>, id: Self::Id) -> &mut Self {
+        assert_const!(size_of::<T>() != 0 && align_of::<T>() <= MAX_ALIGN);
+
+        let byte_offset = id.byte_offset as usize;
+
+        let ptr = unsafe {
+            let raw_ptr = arena.storage.as_mut_ptr().add(byte_offset);
+            raw_ptr.cast()
+        };
+
+        unsafe { &mut *ptr }
+    }
+
+    #[inline]
+    fn get_raw_id(id: Self::Id) -> RawId {
+        RawId { byte_offset: id.byte_offset }
+    }
+}
+
+unsafe impl<T, A> SpecId<A> for [T] {
+    type Id = SliceId<T, A>;
+
+    fn get(arena: &Arena<A>, id: Self::Id) -> &Self {
+        let byte_offset = id.byte_offset as usize;
+        let len = id.len as usize;
+
+        let ptr = unsafe {
+            let raw_ptr = arena.storage.as_ptr().add(byte_offset);
+            raw_ptr.cast()
+        };
+
+        unsafe { from_raw_parts(ptr, len) }
+    }
+
+    fn get_mut(arena: &mut Arena<A>, id: Self::Id) -> &mut Self {
+        let byte_offset = id.byte_offset as usize;
+        let len = id.len as usize;
+
+        let ptr = unsafe {
+            let raw_ptr = arena.storage.as_mut_ptr().add(byte_offset);
+            raw_ptr.cast()
+        };
+
+        unsafe { from_raw_parts_mut(ptr, len) }
+    }
+
+    fn get_raw_id(id: Self::Id) -> RawId {
+        RawId { byte_offset: id.byte_offset }
+    }
 }
 
 /// A unique identifier for an object allocated using `Arena`.
@@ -91,51 +251,36 @@ pub struct RawId {
 /// as the arena itself, meaning it remains valid as long as the arena exists.
 #[derive_where(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 #[repr(transparent)]
-pub struct Id<T, A> {
-    // Invariant: `raw_id.byte_offset` always represents a valid location
-    // within the arena holding a value of type `T`, provided `size_of::<T>() > 0`.
-    raw_id: RawId,
-    _marker: PhantomData<(fn() -> T, A)>,
+pub struct Id<T: ?Sized + SpecId<A>, A> {
+    spec: T::Id,
 }
 
-impl<T, A> Id<T, A> {
+impl<T: ?Sized + SpecId<A>, A> Id<T, A> {
     #[inline]
-    unsafe fn new(byte_offset: usize) -> Id<T, A> {
-        let byte_offset = byte_offset.try_into()
-            .expect("`byte_offset` must not exceed `u32::MAX`");
-
-        Id { raw_id: RawId { byte_offset }, _marker: PhantomData }
-    }
-
-    /// Creates a new `Id<T, S>` from the given `RawId`.
-    /// 
-    /// # Safety
-    /// `raw_id` must have been created from an `Id<T, A>` with the same `T` and `A`.
-    #[inline]
-    pub unsafe fn from_raw(raw_id: RawId) -> Id<T, A> {
-        Id { raw_id, _marker: PhantomData }
+    fn new(spec: T::Id) -> Id<T, A> {
+        Id { spec }
     }
 
     #[inline]
-    pub fn as_raw(&self) -> &RawId {
-        &self.raw_id
+    fn get(self, arena: &Arena<A>) -> &T {
+        T::get(arena, self.spec)
     }
 
     #[inline]
-    pub fn into_raw(self) -> RawId {
-        self.raw_id
+    fn get_mut(self, arena: &mut Arena<A>) -> &mut T {
+        T::get_mut(arena, self.spec)
+    }
+
+    #[inline]
+    pub fn to_raw_id(&self) -> RawId {
+        T::get_raw_id(self.spec)
     }
 }
 
-impl<T, A> Id<MaybeUninit<T>, A> {
-    /// Converts this `Id<MaybeUninit<T>, A>` to `Id<T, A>`,
-    /// assuming the associated value is initialized.
-    ///
-    /// # Safety
-    /// The caller must ensure the value is fully initialized before calling this method.
+impl<T: SpecId<A>, A> From<Id<T, A>> for RawId {
     #[inline]
-    unsafe fn assume_init(self) -> Id<T, A> {
-        Id { raw_id: self.raw_id, _marker: PhantomData }
+    fn from(id: Id<T, A>) -> Self {
+        id.to_raw_id()
     }
 }
 
@@ -149,12 +294,12 @@ impl<T, A> Id<MaybeUninit<T>, A> {
 /// effectively providing a form of type erasure. As a result, it is not possible to
 /// implement proper dropping of individual elements like in `id_arena::Arena`.
 #[derive_where(Debug)]
-pub struct Arena<A, const MAX_ALIGN: usize = 128> {
+pub struct Arena<A> {
     storage: AVec<MaybeUninit<u8>, ConstAlign<MAX_ALIGN>>,
     _marker: PhantomData<A>,
 }
 
-impl<A, const MAX_ALIGN: usize> Arena<A, MAX_ALIGN> {
+impl<A> Arena<A> {
     /// Creates a new, empty arena.
     ///
     /// # Safety
@@ -169,41 +314,14 @@ impl<A, const MAX_ALIGN: usize> Arena<A, MAX_ALIGN> {
 
     /// Returns a shared reference to the arena-allocated object associated with given `Id`.
     #[inline]
-    pub fn get<T>(&self, id: Id<T, A>) -> &T {
-        assert_const!(size_of::<T>() != 0);
-
-        // SAFETY: The pointer returned by `self.get_ptr` is guaranteed to be non-null, 
-        // properly aligned, and point to an initialized value of type `T`. 
-        // Additionally, the arena is borrowed as immutable, upholding aliasing rules.
-        unsafe { self.get_ptr(id).as_ref() }
+    pub fn get<T: ?Sized + SpecId<A>>(&self, id: Id<T, A>) -> &T {
+        id.get(self)
     }
 
     /// Returns a mutable reference to the arena-allocated object associated with given `Id`.
     #[inline]
-    pub fn get_mut<T>(&mut self, id: Id<T, A>) -> &mut T {
-        assert_const!(size_of::<T>() != 0);
-
-        // SAFETY: The pointer returned by `self.get_ptr` is guaranteed to be non-null, 
-        // properly aligned, and point to an initialized value of type `T`. 
-        // Additionally, the arena is borrowed as mutable, upholding aliasing rules.
-        unsafe { self.get_ptr(id).as_mut() }
-    }
-
-    /// Returns a pointer to the object associated with the given id.
-    ///
-    /// The returned value is always safe to dereference, provided aliasing rules are not violated.
-    #[inline]
-    fn get_ptr<T>(&self, id: Id<T, A>) -> NonNull<T> {
-        assert_const!(size_of::<T>() != 0 && align_of::<T>() <= MAX_ALIGN);
-
-        // SAFETY: `id.raw_id.byte_offset` points to a valid object of type `T`.
-        let ptr = unsafe {
-            let raw_ptr = self.storage.as_ptr().add(id.raw_id.byte_offset as usize);
-            raw_ptr as *const T
-        };
-
-        // SAFETY: `ptr` cannot be null.
-        unsafe { NonNull::new_unchecked(ptr.cast_mut()) }
+    pub fn get_mut<T: ?Sized + SpecId<A>>(&mut self, id: Id<T, A>) -> &mut T {
+        id.get_mut(self)
     }
 
     /// Allocates a new value of type `T` in the arena and returns its `Id`.
@@ -216,23 +334,56 @@ impl<A, const MAX_ALIGN: usize> Arena<A, MAX_ALIGN> {
         unsafe { ptr::write(self.get_mut(id).as_mut_ptr(), item); }
 
         // SAFETY: we have just initialized the memory associated with `id`.
-        unsafe { id.assume_init() }
+        unsafe { Id::new(id.spec.assume_init()) }
     }
 
     #[inline]
-    pub fn alloc_uninit<T>(&mut self) -> Id<MaybeUninit<T>, A> {
-        assert_const!(
-            size_of::<T>() != 0 && 
-            align_of::<T>() <= MAX_ALIGN && 
-            align_of::<T>().is_power_of_two()
-        );
+    pub fn alloc_slice<T: Clone>(&mut self, slice: &[T]) -> Id<[T], A> {
+        let id = self.alloc_slice_uninit(slice.len());
+        <MaybeUninit<T> as MaybeUninitExt<T>>::clone_from_slice(self.get_mut(id), slice);
+        unsafe { Id::new(id.spec.assume_init()) }
+    }
 
-        let layout = Layout::new::<T>();
+    #[inline]
+    fn alloc_uninit<T>(&mut self) -> Id<MaybeUninit<T>, A> {
+        assert_const!(align_of::<T>() <= MAX_ALIGN && size_of::<T>() != 0);
 
+        // SAFETY: `align_of::<T>` cannot exceed `MAX_ALIGN`.
+        let byte_offset = unsafe { self.alloc_layout(Layout::new::<T>()) };
+
+        // SAFETY: the memory location at `byte_offset` is properly
+        // aligned to hold a value of type `T` and `MaybeUninit`
+        // does not require initialization.
+        unsafe { Id::new(SizedId::new(byte_offset)) }
+    }
+
+    #[inline]
+    fn alloc_slice_uninit<T>(&mut self, len: usize) -> Id<[MaybeUninit<T>], A> {
+        assert_const!(align_of::<T>() <= MAX_ALIGN && size_of::<T>() != 0);
+
+        let layout = Layout::array::<T>(len).unwrap();
+
+        // SAFETY: the alignment of an array is the same as the alignment of
+        // its elements and `align_of::<T>` cannot exceed `MAX_ALIGN`.
+        let byte_offset = unsafe { self.alloc_layout(layout) };
+
+        // SAFETY: the memory location at `byte_offset` is properly
+        // aligned to hold a value of type `[T; len]` and `MaybeUninit`
+        // does not require initialization.
+        unsafe { Id::new(SliceId::new(byte_offset, len)) }
+    }
+
+    /// Allocates uninitialized memory suitable to hold a value with the given layout
+    /// and returns the index of the beginning of the allocation.
+    ///
+    /// # Safety
+    /// `layout.size()` must not be zero and `layout.align()` must not exceed `MAX_ALIGN`.
+    #[inline]
+    unsafe fn alloc_layout(&mut self, layout: Layout) -> usize {
         // Since the backing storage is aligned to `MAX_ALIGN` and
-        // `align_of::<T>() <= MAX_ALIGN`, we only need to ensure that
+        // `layout.align() <= MAX_ALIGN`, we only need to ensure that
         // the start of the new allocation is aligned to `layout.align()`.
-        // SAFETY: `align_of::<T>()` is guaranteed to be a power of two.
+        // SAFETY: `layout.align()` is guaranteed to be a power of two.
         let padding = unsafe { compute_padding(self.storage.len(), layout.align()) };
 
         // SAFETY: `compute_padding` ensures that `padding < layout.align()`
@@ -241,22 +392,11 @@ impl<A, const MAX_ALIGN: usize> Arena<A, MAX_ALIGN> {
         // `2 * (isize::MAX as usize)`, which is less than `usize::MAX`.
         let padded_size = unsafe { layout.size().unchecked_add(padding) };
 
-        // We will not be touching the first `padding` bytes leaving them 
-        // in an initialized state, which is sound for `MaybeUninit<u8>`.
-        let byte_offset = self.alloc_raw(padded_size);
+        let unaligned_byte_offset = self.alloc_raw(padded_size);
 
-        // We have to ensure that the allocation is properly aligned, so
-        // we added the padding.
         // SAFETY: `padding < padded_size`, `grow()` didn't panic and length
         // cannot be less than capacity, so this must not overflow.
-        let byte_offset = unsafe { byte_offset.unchecked_add(padding) };
-
-        // SAFETY: the memory location at `byte_offset` is properly
-        // aligned to hold a value of type `T` and `MaybeUninit`
-        // does not require initialization.
-        let id: Id<MaybeUninit<T>, A> = unsafe { Id::new(byte_offset) };
-
-        id
+        unsafe { unaligned_byte_offset.unchecked_add(padding) }
     }
 
     /// Allocates `size_in_bytes` uninitialized bytes in the arena and
@@ -311,7 +451,7 @@ const unsafe fn compute_padding(addr: usize, align: usize) -> usize {
     byte_offset
 }
 
-impl<T, A> Index<Id<T, A>> for Arena<A> {
+impl<T: ?Sized + SpecId<A>, A> Index<Id<T, A>> for Arena<A> {
     type Output = T;
 
     #[inline]
@@ -320,7 +460,7 @@ impl<T, A> Index<Id<T, A>> for Arena<A> {
     }
 }
 
-impl<T, A> IndexMut<Id<T, A>> for Arena<A> {
+impl<T: ?Sized + SpecId<A>, A> IndexMut<Id<T, A>> for Arena<A> {
     #[inline]
     fn index_mut(&mut self, id: Id<T, A>) -> &mut Self::Output {
         self.get_mut(id)
@@ -372,7 +512,7 @@ mod test {
     }
 
     #[test]
-    fn arena_alloc_multiple() {
+    fn arena_alloc_multiple_sized() {
         let mut arena = new_arena!();
 
         let a_id = arena.alloc(12u16);
@@ -385,7 +525,7 @@ mod test {
     }
 
     #[test]
-    fn arena_alloc_multiple_mut() {
+    fn arena_alloc_multiple_sized_mut() {
         let mut arena = new_arena!();
 
         let a_id = arena.alloc(12u16);
@@ -404,5 +544,45 @@ mod test {
 
         assert_eq!(arena.get(b_id), &"heaven");
         assert_eq!(*arena.get(a_id), 12u16 * 3);
+    }
+    
+    #[test]
+    fn arena_alloc_slice() {
+        let mut arena = new_arena!();
+        let fruits = ["banana", "orange", "apple"];
+        let id = arena.alloc_slice(&fruits);
+        assert_eq!(arena[id][1], "orange");
+    }
+
+    #[test]
+    fn arena_alloc_slice_mut() {
+        let mut arena = new_arena!();
+        let numbers = [12i64, -451i64, 0i64];
+        let id = arena.alloc_slice(&numbers);
+        assert_eq!(arena[id][1], -451i64);
+        arena[id][1] = 3i64;
+        assert_eq!(arena[id][1], 3i64);
+    }
+    
+    #[test]
+    fn arena_alloc_multiple() {
+        let mut arena = new_arena!();
+        let counter = arena.alloc(123);
+        let fruits = arena.alloc_slice(&["banana", "orange", "apple"]);
+        assert_eq!(arena[counter], 123);
+        assert_eq!(arena[fruits], ["banana", "orange", "apple"]);
+    }
+
+    #[test]
+    fn arena_alloc_multiple_mut() {
+        let mut arena = new_arena!();
+        let counter = arena.alloc(123);
+        let fruits = arena.alloc_slice(&["banana", "orange", "apple"]);
+        assert_eq!(arena[counter], 123);
+        assert_eq!(arena[fruits], ["banana", "orange", "apple"]);
+        arena[counter] = 43;
+        assert_eq!(arena[counter], 43);
+        arena[fruits][0] = "pineapple";
+        assert_eq!(arena[fruits][0], "pineapple");
     }
 }

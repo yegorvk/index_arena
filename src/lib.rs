@@ -59,7 +59,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::ops::{Index, IndexMut};
 use std::slice::{from_raw_parts, from_raw_parts_mut};
-
+use std::str::{from_utf8_unchecked, from_utf8_unchecked_mut};
 use aligned_vec::{AVec, ConstAlign};
 use derive_where::derive_where;
 
@@ -123,6 +123,9 @@ impl<T, A> SizedId<MaybeUninit<T>, A> {
     }
 }
 
+/// `Id` specialization for slices.
+///
+/// All the guarantees `Id` makes also apply for this type.
 #[derive_where(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 struct SliceId<T, A> {
     byte_offset: u32,
@@ -153,6 +156,21 @@ impl<T, A> SliceId<MaybeUninit<T>, A> {
     #[inline]
     unsafe fn assume_init(self) -> SliceId<T, A> {
         SliceId { byte_offset: self.byte_offset, len: self.len, _marker: PhantomData }
+    }
+}
+
+/// `Id` specialization for string slices.
+/// 
+/// The underlying slice always represents a valid UTF-8 encoded string.
+/// All the guarantees `Id` makes also apply for this type.
+#[derive_where(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[repr(transparent)]
+struct StrId<A>(SliceId<u8, A>);
+
+impl<A> StrId<A> {
+    #[inline]
+    unsafe fn new(slice_id: SliceId<u8, A>) -> StrId<A> {
+        StrId(slice_id)
     }
 }
 
@@ -238,6 +256,24 @@ unsafe impl<T, A> SpecId<A> for [T] {
         RawId { byte_offset: id.byte_offset }
     }
 }
+
+unsafe impl<A> SpecId<A> for str {
+    type Id = StrId<A>;
+
+    fn get(arena: &Arena<A>, id: Self::Id) -> &Self {
+        let bytes = <[u8] as SpecId<A>>::get(arena, id.0);
+        unsafe { from_utf8_unchecked(bytes) }
+    }
+
+    fn get_mut(arena: &mut Arena<A>, id: Self::Id) -> &mut Self {
+        let bytes = <[u8] as SpecId<A>>::get_mut(arena, id.0);
+        unsafe { from_utf8_unchecked_mut(bytes) }
+    }
+
+    fn get_raw_id(id: Self::Id) -> RawId {
+        <[u8] as SpecId<A>>::get_raw_id(id.0)
+    }
+} 
 
 /// A unique identifier for an object allocated using `Arena`.
 ///
@@ -342,6 +378,12 @@ impl<A> Arena<A> {
         let id = self.alloc_slice_uninit(slice.len());
         <MaybeUninit<T> as MaybeUninitExt<T>>::clone_from_slice(self.get_mut(id), slice);
         unsafe { Id::new(id.spec.assume_init()) }
+    }
+    
+    #[inline]
+    pub fn alloc_str(&mut self, str: &str) -> Id<str, A> {
+        let slice = self.alloc_slice(str.as_bytes());
+        Id::new(unsafe { StrId::new(slice.spec) })
     }
 
     #[inline]
@@ -584,5 +626,12 @@ mod test {
         assert_eq!(arena[counter], 43);
         arena[fruits][0] = "pineapple";
         assert_eq!(arena[fruits][0], "pineapple");
+    }
+    
+    #[test]
+    fn arena_alloc_str() {
+        let mut arena = new_arena!();
+        let hello = arena.alloc_str("Hello!");
+        assert_eq!(&arena[hello], "Hello!");
     }
 }

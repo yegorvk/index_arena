@@ -9,13 +9,14 @@
 //! This leverages the type system to statically assign every identifier to the
 //! arena it belongs to, ensuring safety without incurring runtime overhead.
 //!
-//! Accessing individual elements is done through the various
-//! arena methods, conceptually similar to indexing a `Vec`.
+//! Accessing individual elements is achieved via various arena methods, 
+//! conceptually similar to indexing a `Vec`.
 //!
 //! ## Heterogeneous
 //!
-//! Supports allocating values of all statically sized non-ZST types, which is especially useful
-//! in scenarios where you have tree-like data structures with different node types.
+//! Supports allocating values of all statically sized, non-ZST types as well slices and string slices. 
+//! This is particularly useful for managing tree-like data structures 
+//! with different node types.
 //!
 //! ## Statically guaranteed safety
 //!

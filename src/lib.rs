@@ -381,10 +381,23 @@ impl<A> Arena<A> {
     }
 
     /// Allocates a new value of type `T` in the arena and returns its `Id`.
-    #[inline]
     pub fn alloc<T>(&mut self, item: T) -> Id<T, A> {
+        self.try_alloc(item).unwrap()
+    }
+
+    pub fn alloc_slice<T: Clone>(&mut self, slice: &[T]) -> Id<[T], A> {
+        self.try_alloc_slice(slice).unwrap()
+    }
+
+    pub fn alloc_str(&mut self, str: &str) -> Id<str, A> {
+        self.try_alloc_str(str).unwrap()
+    }
+
+    /// Try to allocates a new value of type `T` in the arena and returns its `Id`.
+    #[inline]
+    pub fn try_alloc<T>(&mut self, item: T) -> Option<Id<T, A>> {
         // Allocate a new item without initializing it.
-        let id = self.alloc_uninit::<T>();
+        let id = self.alloc_uninit::<T>()?;
 
         // SAFETY: `MaybeUninit::as_mut_ptr` always returns a valid pointer for `ptr::write`.
         unsafe {
@@ -392,49 +405,49 @@ impl<A> Arena<A> {
         }
 
         // SAFETY: we have just initialized the memory associated with `id`.
-        unsafe { Id::new(id.spec.assume_init()) }
+        Some(unsafe { Id::new(id.spec.assume_init()) })
     }
 
     #[inline]
-    pub fn alloc_slice<T: Clone>(&mut self, slice: &[T]) -> Id<[T], A> {
-        let id = self.alloc_slice_uninit(slice.len());
+    pub fn try_alloc_slice<T: Clone>(&mut self, slice: &[T]) -> Option<Id<[T], A>> {
+        let id = self.alloc_slice_uninit(slice.len())?;
         <MaybeUninit<T> as MaybeUninitExt<T>>::clone_from_slice(self.get_mut(id), slice);
-        unsafe { Id::new(id.spec.assume_init()) }
+        Some(unsafe { Id::new(id.spec.assume_init()) })
     }
 
     #[inline]
-    pub fn alloc_str(&mut self, str: &str) -> Id<str, A> {
-        let slice = self.alloc_slice(str.as_bytes());
-        Id::new(unsafe { StrId::new(slice.spec) })
+    pub fn try_alloc_str(&mut self, str: &str) -> Option<Id<str, A>> {
+        let slice = self.try_alloc_slice(str.as_bytes())?;
+        Some(Id::new(unsafe { StrId::new(slice.spec) }))
     }
 
     #[inline]
-    fn alloc_uninit<T>(&mut self) -> Id<MaybeUninit<T>, A> {
+    fn alloc_uninit<T>(&mut self) -> Option<Id<MaybeUninit<T>, A>> {
         assert_const!(align_of::<T>() <= MAX_ALIGN && size_of::<T>() != 0);
 
         // SAFETY: `align_of::<T>` cannot exceed `MAX_ALIGN`.
-        let byte_offset = unsafe { self.alloc_layout(Layout::new::<T>()) };
+        let byte_offset = unsafe { self.alloc_layout(Layout::new::<T>()) }?;
 
         // SAFETY: the memory location at `byte_offset` is properly
         // aligned to hold a value of type `T` and `MaybeUninit`
         // does not require initialization.
-        unsafe { Id::new(SizedId::new(byte_offset)) }
+        Some(unsafe { Id::new(SizedId::new(byte_offset)) })
     }
 
     #[inline]
-    fn alloc_slice_uninit<T>(&mut self, len: usize) -> Id<[MaybeUninit<T>], A> {
+    fn alloc_slice_uninit<T>(&mut self, len: usize) -> Option<Id<[MaybeUninit<T>], A>> {
         assert_const!(align_of::<T>() <= MAX_ALIGN && size_of::<T>() != 0);
 
         let layout = Layout::array::<T>(len).unwrap();
 
         // SAFETY: the alignment of an array is the same as the alignment of
         // its elements and `align_of::<T>` cannot exceed `MAX_ALIGN`.
-        let byte_offset = unsafe { self.alloc_layout(layout) };
+        let byte_offset = unsafe { self.alloc_layout(layout) }?;
 
         // SAFETY: the memory location at `byte_offset` is properly
         // aligned to hold a value of type `[T; len]` and `MaybeUninit`
         // does not require initialization.
-        unsafe { Id::new(SliceId::new(byte_offset, len)) }
+        unsafe { Some(Id::new(SliceId::new(byte_offset, len))) }
     }
 
     /// Allocates uninitialized memory suitable to hold a value with the given layout
@@ -443,7 +456,7 @@ impl<A> Arena<A> {
     /// # Safety
     /// `layout.size()` must not be zero and `layout.align()` must not exceed `MAX_ALIGN`.
     #[inline]
-    unsafe fn alloc_layout(&mut self, layout: Layout) -> usize {
+    unsafe fn alloc_layout(&mut self, layout: Layout) -> Option<usize> {
         // Since the backing storage is aligned to `MAX_ALIGN` and
         // `layout.align() <= MAX_ALIGN`, we only need to ensure that
         // the start of the new allocation is aligned to `layout.align()`.
@@ -456,17 +469,17 @@ impl<A> Arena<A> {
         // `2 * (isize::MAX as usize)`, which is less than `usize::MAX`.
         let padded_size = unsafe { layout.size().unchecked_add(padding) };
 
-        let unaligned_byte_offset = self.alloc_raw(padded_size);
+        let unaligned_byte_offset = self.alloc_raw(padded_size)?;
 
         // SAFETY: `padding < padded_size`, `grow()` didn't panic and length
         // cannot be less than capacity, so this must not overflow.
-        unsafe { unaligned_byte_offset.unchecked_add(padding) }
+        unsafe { Some(unaligned_byte_offset.unchecked_add(padding)) }
     }
 
     /// Allocates `size_in_bytes` uninitialized bytes in the arena and
     /// returns the byte offset of the beginning of the allocation.
     #[inline]
-    fn alloc_raw(&mut self, size_in_bytes: usize) -> usize {
+    fn alloc_raw(&mut self, size_in_bytes: usize) -> Option<usize> {
         self.storage.reserve(size_in_bytes);
 
         let old_len = self.storage.len();
@@ -480,7 +493,7 @@ impl<A> Arena<A> {
             self.storage.set_len(new_len);
         }
 
-        old_len
+        Some(old_len)
     }
 }
 

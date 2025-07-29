@@ -31,14 +31,14 @@
 //! ## Examples
 //!
 //! ```rust
-//! use index_arena::{Id, new_arena};
+//! use index_arena::{Id, new_arena, Storage};
 //!
-//! struct Even<A> {
-//!     next: Option<Id<Odd<A>, A>>,
+//! struct Even<A, S: Storage> {
+//!     next: Option<Id<Odd<A, S>, A, S>>,
 //! }
 //!
-//! struct Odd<A> {
-//!     next: Option<Id<Even<A>, A>>,
+//! struct Odd<A, S: Storage> {
+//!     next: Option<Id<Even<A, S>, A, S>>,
 //! }
 //!
 //! let mut arena = new_arena!();
@@ -67,6 +67,46 @@ use derive_where::derive_where;
 use crate::utils::MaybeUninitExt;
 
 mod utils;
+
+pub trait Storage {
+    fn alloc_raw(&mut self, len: usize) -> Option<usize>;
+    fn current_byte_offset(&self) -> usize;
+    fn as_ptr(&self) -> *const MaybeUninit<u8>;
+    fn as_mut_ptr(&mut self) -> *mut MaybeUninit<u8>;
+}
+
+type AVecBytes = AVec<MaybeUninit<u8>, ConstAlign<MAX_ALIGN>>;
+
+impl Storage for AVecBytes {
+    fn alloc_raw(&mut self, len: usize) -> Option<usize> {
+        self.reserve(len);
+
+        let old_len = self.len();
+
+        // SAFETY: `storage.reserve()` didn't panic and length cannot
+        // be less than capacity, so this must not overflow.
+        let new_len = unsafe { old_len.unchecked_add(len) };
+
+        // SAFETY: we have just reserved `additional` bytes.
+        unsafe {
+            self.set_len(new_len);
+        }
+
+        Some(old_len)
+    }
+
+    fn as_ptr(&self) -> *const MaybeUninit<u8> {
+        self.as_ptr()
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut MaybeUninit<u8> {
+        self.as_mut_ptr()
+    }
+
+    fn current_byte_offset(&self) -> usize {
+        self.len()
+    }
+}
 
 macro_rules! assert_const {
     ($cond:expr, $($arg:tt)+) => {
@@ -194,21 +234,21 @@ impl<A> StrId<A> {
 ///
 /// # Safety
 /// Implementors must uphold all the guarantees `Id` makes.
-unsafe trait SpecId<A> {
+unsafe trait SpecId<A, S> {
     type Id: Debug + Copy + Clone + Eq + PartialEq + Hash;
 
-    fn get(arena: &Arena<A>, id: Self::Id) -> &Self;
+    fn get(arena: &Arena<A, S>, id: Self::Id) -> &Self;
 
-    fn get_mut(arena: &mut Arena<A>, id: Self::Id) -> &mut Self;
+    fn get_mut(arena: &mut Arena<A, S>, id: Self::Id) -> &mut Self;
 
     fn get_raw_id(id: Self::Id) -> RawId;
 }
 
-unsafe impl<T, A> SpecId<A> for T {
+unsafe impl<T, A, S: Storage> SpecId<A, S> for T {
     type Id = SizedId<T, A>;
 
     #[inline]
-    fn get(arena: &Arena<A>, id: Self::Id) -> &Self {
+    fn get(arena: &Arena<A, S>, id: Self::Id) -> &Self {
         assert_const!(size_of::<T>() != 0 && align_of::<T>() <= MAX_ALIGN);
 
         let byte_offset = id.byte_offset as usize;
@@ -222,7 +262,7 @@ unsafe impl<T, A> SpecId<A> for T {
     }
 
     #[inline]
-    fn get_mut(arena: &mut Arena<A>, id: Self::Id) -> &mut Self {
+    fn get_mut(arena: &mut Arena<A, S>, id: Self::Id) -> &mut Self {
         assert_const!(size_of::<T>() != 0 && align_of::<T>() <= MAX_ALIGN);
 
         let byte_offset = id.byte_offset as usize;
@@ -243,10 +283,10 @@ unsafe impl<T, A> SpecId<A> for T {
     }
 }
 
-unsafe impl<T, A> SpecId<A> for [T] {
+unsafe impl<T, A, S: Storage> SpecId<A, S> for [T] {
     type Id = SliceId<T, A>;
 
-    fn get(arena: &Arena<A>, id: Self::Id) -> &Self {
+    fn get(arena: &Arena<A, S>, id: Self::Id) -> &Self {
         let byte_offset = id.byte_offset as usize;
         let len = id.len as usize;
 
@@ -258,7 +298,7 @@ unsafe impl<T, A> SpecId<A> for [T] {
         unsafe { from_raw_parts(ptr, len) }
     }
 
-    fn get_mut(arena: &mut Arena<A>, id: Self::Id) -> &mut Self {
+    fn get_mut(arena: &mut Arena<A, S>, id: Self::Id) -> &mut Self {
         let byte_offset = id.byte_offset as usize;
         let len = id.len as usize;
 
@@ -277,21 +317,21 @@ unsafe impl<T, A> SpecId<A> for [T] {
     }
 }
 
-unsafe impl<A> SpecId<A> for str {
+unsafe impl<A, S: Storage> SpecId<A, S> for str {
     type Id = StrId<A>;
 
-    fn get(arena: &Arena<A>, id: Self::Id) -> &Self {
-        let bytes = <[u8] as SpecId<A>>::get(arena, id.0);
+    fn get(arena: &Arena<A, S>, id: Self::Id) -> &Self {
+        let bytes = <[u8] as SpecId<A, S>>::get(arena, id.0);
         unsafe { from_utf8_unchecked(bytes) }
     }
 
-    fn get_mut(arena: &mut Arena<A>, id: Self::Id) -> &mut Self {
-        let bytes = <[u8] as SpecId<A>>::get_mut(arena, id.0);
+    fn get_mut(arena: &mut Arena<A, S>, id: Self::Id) -> &mut Self {
+        let bytes = <[u8] as SpecId<A, S>>::get_mut(arena, id.0);
         unsafe { from_utf8_unchecked_mut(bytes) }
     }
 
     fn get_raw_id(id: Self::Id) -> RawId {
-        <[u8] as SpecId<A>>::get_raw_id(id.0)
+        <[u8] as SpecId<A, S>>::get_raw_id(id.0)
     }
 }
 
@@ -307,23 +347,23 @@ unsafe impl<A> SpecId<A> for str {
 /// as the arena itself, meaning it remains valid as long as the arena exists.
 #[derive_where(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 #[repr(transparent)]
-pub struct Id<T: ?Sized + SpecId<A>, A> {
+pub struct Id<T: ?Sized + SpecId<A, S>, A, S> {
     spec: T::Id,
 }
 
-impl<T: ?Sized + SpecId<A>, A> Id<T, A> {
+impl<T: ?Sized + SpecId<A, S>, A, S> Id<T, A, S> {
     #[inline]
-    fn new(spec: T::Id) -> Id<T, A> {
+    fn new(spec: T::Id) -> Id<T, A, S> {
         Id { spec }
     }
 
     #[inline]
-    fn get(self, arena: &Arena<A>) -> &T {
+    fn get(self, arena: &Arena<A, S>) -> &T {
         T::get(arena, self.spec)
     }
 
     #[inline]
-    fn get_mut(self, arena: &mut Arena<A>) -> &mut T {
+    fn get_mut(self, arena: &mut Arena<A, S>) -> &mut T {
         T::get_mut(arena, self.spec)
     }
 
@@ -333,9 +373,9 @@ impl<T: ?Sized + SpecId<A>, A> Id<T, A> {
     }
 }
 
-impl<T: SpecId<A>, A> From<Id<T, A>> for RawId {
+impl<T: SpecId<A, S>, A, S> From<Id<T, A, S>> for RawId {
     #[inline]
-    fn from(id: Id<T, A>) -> Self {
+    fn from(id: Id<T, A, S>) -> Self {
         id.to_raw_id()
     }
 }
@@ -349,53 +389,68 @@ impl<T: SpecId<A>, A> From<Id<T, A>> for RawId {
 /// However, this approach has a downside: the arena does not track individual elements,
 /// effectively providing a form of type erasure. As a result, it is not possible to
 /// implement proper dropping of individual elements like in `id_arena::Arena`.
-#[derive_where(Debug)]
-pub struct Arena<A> {
-    storage: AVec<MaybeUninit<u8>, ConstAlign<MAX_ALIGN>>,
+// #[derive_where(Debug)]
+pub struct Arena<A, S> {
+    storage: S,
+    // storage: AVec<MaybeUninit<u8>, ConstAlign<MAX_ALIGN>>,
     _marker: PhantomData<A>,
 }
 
-impl<A> Arena<A> {
+impl<A> Arena<A, AVecBytes> {
     /// Creates a new, empty arena.
     ///
     /// # Safety
     /// The caller must ensure that the `A` type parameter is only used for this arena.
     #[inline]
-    pub unsafe fn new() -> Arena<A> {
+    pub unsafe fn new() -> Self {
         Arena {
-            storage: AVec::new(0),
+            storage: AVecBytes::new(0),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<A, S: Storage> Arena<A, S> {
+    /// Creates a new, empty arena.
+    ///
+    /// # Safety
+    /// The caller must ensure that the `A` type parameter is only used for this arena.
+    #[inline]
+    pub unsafe fn new_with_storage(storage: S) -> Self {
+        Arena {
+            storage,
             _marker: PhantomData,
         }
     }
 
     /// Returns a shared reference to the arena-allocated object associated with given `Id`.
     #[inline]
-    pub fn get<T: ?Sized + SpecId<A>>(&self, id: Id<T, A>) -> &T {
+    pub fn get<T: ?Sized + SpecId<A, S>>(&self, id: Id<T, A, S>) -> &T {
         id.get(self)
     }
 
     /// Returns a mutable reference to the arena-allocated object associated with given `Id`.
     #[inline]
-    pub fn get_mut<T: ?Sized + SpecId<A>>(&mut self, id: Id<T, A>) -> &mut T {
+    pub fn get_mut<T: ?Sized + SpecId<A, S>>(&mut self, id: Id<T, A, S>) -> &mut T {
         id.get_mut(self)
     }
 
     /// Allocates a new value of type `T` in the arena and returns its `Id`.
-    pub fn alloc<T>(&mut self, item: T) -> Id<T, A> {
+    pub fn alloc<T>(&mut self, item: T) -> Id<T, A, S> {
         self.try_alloc(item).unwrap()
     }
 
-    pub fn alloc_slice<T: Clone>(&mut self, slice: &[T]) -> Id<[T], A> {
+    pub fn alloc_slice<T: Clone>(&mut self, slice: &[T]) -> Id<[T], A, S> {
         self.try_alloc_slice(slice).unwrap()
     }
 
-    pub fn alloc_str(&mut self, str: &str) -> Id<str, A> {
+    pub fn alloc_str(&mut self, str: &str) -> Id<str, A, S> {
         self.try_alloc_str(str).unwrap()
     }
 
     /// Try to allocates a new value of type `T` in the arena and returns its `Id`.
     #[inline]
-    pub fn try_alloc<T>(&mut self, item: T) -> Option<Id<T, A>> {
+    pub fn try_alloc<T>(&mut self, item: T) -> Option<Id<T, A, S>> {
         // Allocate a new item without initializing it.
         let id = self.alloc_uninit::<T>()?;
 
@@ -409,20 +464,20 @@ impl<A> Arena<A> {
     }
 
     #[inline]
-    pub fn try_alloc_slice<T: Clone>(&mut self, slice: &[T]) -> Option<Id<[T], A>> {
+    pub fn try_alloc_slice<T: Clone>(&mut self, slice: &[T]) -> Option<Id<[T], A, S>> {
         let id = self.alloc_slice_uninit(slice.len())?;
         <MaybeUninit<T> as MaybeUninitExt<T>>::clone_from_slice(self.get_mut(id), slice);
         Some(unsafe { Id::new(id.spec.assume_init()) })
     }
 
     #[inline]
-    pub fn try_alloc_str(&mut self, str: &str) -> Option<Id<str, A>> {
+    pub fn try_alloc_str(&mut self, str: &str) -> Option<Id<str, A, S>> {
         let slice = self.try_alloc_slice(str.as_bytes())?;
         Some(Id::new(unsafe { StrId::new(slice.spec) }))
     }
 
     #[inline]
-    fn alloc_uninit<T>(&mut self) -> Option<Id<MaybeUninit<T>, A>> {
+    fn alloc_uninit<T>(&mut self) -> Option<Id<MaybeUninit<T>, A, S>> {
         assert_const!(align_of::<T>() <= MAX_ALIGN && size_of::<T>() != 0);
 
         // SAFETY: `align_of::<T>` cannot exceed `MAX_ALIGN`.
@@ -435,7 +490,7 @@ impl<A> Arena<A> {
     }
 
     #[inline]
-    fn alloc_slice_uninit<T>(&mut self, len: usize) -> Option<Id<[MaybeUninit<T>], A>> {
+    fn alloc_slice_uninit<T>(&mut self, len: usize) -> Option<Id<[MaybeUninit<T>], A, S>> {
         assert_const!(align_of::<T>() <= MAX_ALIGN && size_of::<T>() != 0);
 
         let layout = Layout::array::<T>(len).unwrap();
@@ -461,7 +516,8 @@ impl<A> Arena<A> {
         // `layout.align() <= MAX_ALIGN`, we only need to ensure that
         // the start of the new allocation is aligned to `layout.align()`.
         // SAFETY: `layout.align()` is guaranteed to be a power of two.
-        let padding = unsafe { compute_padding(self.storage.len(), layout.align()) };
+        let padding =
+            unsafe { compute_padding(self.storage.current_byte_offset(), layout.align()) };
 
         // SAFETY: `compute_padding` ensures that `padding < layout.align()`
         // and `Layout` guarantees that both size and alignment do not exceed
@@ -471,7 +527,7 @@ impl<A> Arena<A> {
 
         let unaligned_byte_offset = self.alloc_raw(padded_size)?;
 
-        // SAFETY: `padding < padded_size`, `grow()` didn't panic and length
+        // SAFETY: `padding < padded_size`, `grow()` didn't panic or return and length
         // cannot be less than capacity, so this must not overflow.
         unsafe { Some(unaligned_byte_offset.unchecked_add(padding)) }
     }
@@ -480,20 +536,7 @@ impl<A> Arena<A> {
     /// returns the byte offset of the beginning of the allocation.
     #[inline]
     fn alloc_raw(&mut self, size_in_bytes: usize) -> Option<usize> {
-        self.storage.reserve(size_in_bytes);
-
-        let old_len = self.storage.len();
-
-        // SAFETY: `storage.reserve()` didn't panic and length cannot
-        // be less than capacity, so this must not overflow.
-        let new_len = unsafe { old_len.unchecked_add(size_in_bytes) };
-
-        // SAFETY: we have just reserved `additional` bytes.
-        unsafe {
-            self.storage.set_len(new_len);
-        }
-
-        Some(old_len)
+        self.storage.alloc_raw(size_in_bytes)
     }
 }
 
@@ -530,32 +573,47 @@ const unsafe fn compute_padding(addr: usize, align: usize) -> usize {
     byte_offset
 }
 
-impl<T: ?Sized + SpecId<A>, A> Index<Id<T, A>> for Arena<A> {
+impl<T: ?Sized + SpecId<A, S>, A, S: Storage> Index<Id<T, A, S>> for Arena<A, S> {
     type Output = T;
 
     #[inline]
-    fn index(&self, id: Id<T, A>) -> &Self::Output {
+    fn index(&self, id: Id<T, A, S>) -> &Self::Output {
         self.get(id)
     }
 }
 
-impl<T: ?Sized + SpecId<A>, A> IndexMut<Id<T, A>> for Arena<A> {
+impl<T: ?Sized + SpecId<A, S>, A, S: Storage> IndexMut<Id<T, A, S>> for Arena<A, S> {
     #[inline]
-    fn index_mut(&mut self, id: Id<T, A>) -> &mut Self::Output {
+    fn index_mut(&mut self, id: Id<T, A, S>) -> &mut Self::Output {
         self.get_mut(id)
     }
 }
 
 #[macro_export]
 macro_rules! new_arena {
-    () => {
-        $crate::new_arena!(Default)
-    };
+    () => {{ $crate::new_arena!(Default) }};
 
     ($name:ident) => {{
         struct $name;
         // SAFETY: `$name` is unique for each macro invocation.
-        unsafe { $crate::Arena::<$name>::new() }
+        unsafe { $crate::Arena::<$name, _>::new() }
+    }};
+
+    ($storage:expr, $name:ident) => {{
+        struct $name;
+        // SAFETY: `$name` is unique for each macro invocation.
+        unsafe { $crate::Arena::<$name, _>::with_storage($storage) }
+    }};
+}
+
+#[macro_export]
+macro_rules! new_arena_with_storage {
+    ($storage:expr) => {{ $crate::new_arena_with_storage!($storage, Default) }};
+
+    ($storage:expr, $name:ident) => {{
+        struct $name;
+        // SAFETY: `$name` is unique for each macro invocation.
+        unsafe { $crate::Arena::<$name, _>::new_with_storage($storage) }
     }};
 }
 
@@ -668,5 +726,88 @@ mod test {
         let mut arena = new_arena!();
         let hello = arena.alloc_str("Hello!");
         assert_eq!(&arena[hello], "Hello!");
+    }
+}
+
+#[cfg(test)]
+mod test_array_storage {
+    use super::*;
+
+    struct ArrayStorage<const SIZE: usize> {
+        bytes: [MaybeUninit<u8>; SIZE],
+        current_byte_offset: usize,
+    }
+
+    impl<const SIZE: usize> ArrayStorage<SIZE> {
+        fn new() -> Self {
+            Self {
+                bytes: [MaybeUninit::uninit(); SIZE],
+                current_byte_offset: 0,
+            }
+        }
+    }
+
+    impl<const S: usize> Storage for ArrayStorage<S> {
+        fn alloc_raw(&mut self, len: usize) -> Option<usize> {
+            let old_byte_offset = self.current_byte_offset;
+            let new_byte_offset = self.current_byte_offset + len;
+            if new_byte_offset > self.bytes.len() {
+                None
+            } else {
+                self.current_byte_offset = new_byte_offset;
+                Some(old_byte_offset)
+            }
+        }
+
+        fn current_byte_offset(&self) -> usize {
+            self.current_byte_offset
+        }
+
+        fn as_ptr(&self) -> *const MaybeUninit<u8> {
+            self.bytes.as_ptr()
+        }
+
+        fn as_mut_ptr(&mut self) -> *mut MaybeUninit<u8> {
+            self.bytes.as_mut_ptr()
+        }
+    }
+
+    #[test]
+    fn arena_alloc_str() {
+        let mut arena = new_arena_with_storage!(ArrayStorage::<128>::new());
+        let hello = arena.alloc_str("Hello!");
+        assert_eq!(&arena[hello], "Hello!");
+    }
+
+    #[test]
+    fn arena_try_alloc_str() {
+        let mut arena = new_arena_with_storage!(ArrayStorage::<6>::new());
+        let hello = arena.alloc_str("Hello!");
+        assert_eq!(&arena[hello], "Hello!");
+
+        let mut arena = new_arena_with_storage!(ArrayStorage::<5>::new());
+        let hello = arena.try_alloc_str("Hello!");
+        assert!(hello.is_none());
+
+        let mut arena = new_arena_with_storage!(ArrayStorage::<6>::new());
+        let hello = arena.try_alloc_str("Hello!");
+        let again = arena.try_alloc_str("A");
+        assert_eq!(&arena[hello.unwrap()], "Hello!");
+        assert!(again.is_none())
+    }
+
+    #[test]
+    #[should_panic]
+    fn arena_try_alloc_str_fail() {
+        let mut arena = new_arena_with_storage!(ArrayStorage::<5>::new());
+        let _hello = arena.alloc_str("Hello!");
+    }
+
+    #[test]
+    fn arena_alloc_slice() {
+        let mut arena = new_arena_with_storage!(ArrayStorage::<128>::new());
+        let fruits = ["banana", "orange", "apple"];
+        let id = arena.alloc_slice(&fruits);
+        assert_eq!(arena[id][1], "orange");
     }
 }

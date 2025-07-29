@@ -9,13 +9,13 @@
 //! This leverages the type system to statically assign every identifier to the
 //! arena it belongs to, ensuring safety without incurring runtime overhead.
 //!
-//! Accessing individual elements is achieved via various arena methods, 
+//! Accessing individual elements is achieved via various arena methods,
 //! conceptually similar to indexing a `Vec`.
 //!
 //! ## Heterogeneous
 //!
-//! Supports allocating values of all statically sized, non-ZST types as well slices and string slices. 
-//! This is particularly useful for managing tree-like data structures 
+//! Supports allocating values of all statically sized, non-ZST types as well slices and string slices.
+//! This is particularly useful for managing tree-like data structures
 //! with different node types.
 //!
 //! ## Statically guaranteed safety
@@ -52,16 +52,16 @@
 
 #![allow(private_bounds)]
 
+use aligned_vec::{AVec, ConstAlign};
 use core::alloc::Layout;
+use core::fmt::Debug;
+use core::hash::Hash;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
+use core::ops::{Index, IndexMut};
 use core::ptr;
-use std::fmt::Debug;
-use std::hash::Hash;
-use std::ops::{Index, IndexMut};
-use std::slice::{from_raw_parts, from_raw_parts_mut};
-use std::str::{from_utf8_unchecked, from_utf8_unchecked_mut};
-use aligned_vec::{AVec, ConstAlign};
+use core::slice::{from_raw_parts, from_raw_parts_mut};
+use core::str::{from_utf8_unchecked, from_utf8_unchecked_mut};
 use derive_where::derive_where;
 
 use crate::utils::MaybeUninitExt;
@@ -105,10 +105,14 @@ struct SizedId<T, A> {
 impl<T, A> SizedId<T, A> {
     #[inline]
     unsafe fn new(byte_offset: usize) -> SizedId<T, A> {
-        let byte_offset: u32 = byte_offset.try_into()
+        let byte_offset: u32 = byte_offset
+            .try_into()
             .expect("`byte_offset` must not exceed `u32::MAX`");
 
-        SizedId { byte_offset, _marker: PhantomData }
+        SizedId {
+            byte_offset,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -120,7 +124,10 @@ impl<T, A> SizedId<MaybeUninit<T>, A> {
     /// The caller must ensure the value is fully initialized before calling this method.
     #[inline]
     unsafe fn assume_init(self) -> SizedId<T, A> {
-        SizedId { byte_offset: self.byte_offset, _marker: PhantomData }
+        SizedId {
+            byte_offset: self.byte_offset,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -137,13 +144,17 @@ struct SliceId<T, A> {
 impl<T, A> SliceId<T, A> {
     #[inline]
     unsafe fn new(byte_offset: usize, len: usize) -> SliceId<T, A> {
-        let byte_offset: u32 = byte_offset.try_into()
+        let byte_offset: u32 = byte_offset
+            .try_into()
             .expect("`byte_offset` must not exceed `u32::MAX`");
 
-        let len: u32 = len.try_into()
-            .expect("`len` must not exceed `u32::MAX`");
+        let len: u32 = len.try_into().expect("`len` must not exceed `u32::MAX`");
 
-        SliceId { byte_offset, len, _marker: PhantomData }
+        SliceId {
+            byte_offset,
+            len,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -156,12 +167,16 @@ impl<T, A> SliceId<MaybeUninit<T>, A> {
     /// initialized before calling this method.
     #[inline]
     unsafe fn assume_init(self) -> SliceId<T, A> {
-        SliceId { byte_offset: self.byte_offset, len: self.len, _marker: PhantomData }
+        SliceId {
+            byte_offset: self.byte_offset,
+            len: self.len,
+            _marker: PhantomData,
+        }
     }
 }
 
 /// `Id` specialization for string slices.
-/// 
+///
 /// The underlying slice always represents a valid UTF-8 encoded string.
 /// All the guarantees `Id` makes also apply for this type.
 #[derive_where(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -222,7 +237,9 @@ unsafe impl<T, A> SpecId<A> for T {
 
     #[inline]
     fn get_raw_id(id: Self::Id) -> RawId {
-        RawId { byte_offset: id.byte_offset }
+        RawId {
+            byte_offset: id.byte_offset,
+        }
     }
 }
 
@@ -254,7 +271,9 @@ unsafe impl<T, A> SpecId<A> for [T] {
     }
 
     fn get_raw_id(id: Self::Id) -> RawId {
-        RawId { byte_offset: id.byte_offset }
+        RawId {
+            byte_offset: id.byte_offset,
+        }
     }
 }
 
@@ -274,7 +293,7 @@ unsafe impl<A> SpecId<A> for str {
     fn get_raw_id(id: Self::Id) -> RawId {
         <[u8] as SpecId<A>>::get_raw_id(id.0)
     }
-} 
+}
 
 /// A unique identifier for an object allocated using `Arena`.
 ///
@@ -368,7 +387,9 @@ impl<A> Arena<A> {
         let id = self.alloc_uninit::<T>();
 
         // SAFETY: `MaybeUninit::as_mut_ptr` always returns a valid pointer for `ptr::write`.
-        unsafe { ptr::write(self.get_mut(id).as_mut_ptr(), item); }
+        unsafe {
+            ptr::write(self.get_mut(id).as_mut_ptr(), item);
+        }
 
         // SAFETY: we have just initialized the memory associated with `id`.
         unsafe { Id::new(id.spec.assume_init()) }
@@ -380,7 +401,7 @@ impl<A> Arena<A> {
         <MaybeUninit<T> as MaybeUninitExt<T>>::clone_from_slice(self.get_mut(id), slice);
         unsafe { Id::new(id.spec.assume_init()) }
     }
-    
+
     #[inline]
     pub fn alloc_str(&mut self, str: &str) -> Id<str, A> {
         let slice = self.alloc_slice(str.as_bytes());
@@ -455,7 +476,9 @@ impl<A> Arena<A> {
         let new_len = unsafe { old_len.unchecked_add(size_in_bytes) };
 
         // SAFETY: we have just reserved `additional` bytes.
-        unsafe { self.storage.set_len(new_len); }
+        unsafe {
+            self.storage.set_len(new_len);
+        }
 
         old_len
     }
@@ -516,13 +539,11 @@ macro_rules! new_arena {
         $crate::new_arena!(Default)
     };
 
-    ($name:ident) => {
-        {
-            struct $name;
-            // SAFETY: `$name` is unique for each macro invocation.
-            unsafe { $crate::Arena::<$name>::new() }
-        }
-    };
+    ($name:ident) => {{
+        struct $name;
+        // SAFETY: `$name` is unique for each macro invocation.
+        unsafe { $crate::Arena::<$name>::new() }
+    }};
 }
 
 #[cfg(test)]
@@ -588,7 +609,7 @@ mod test {
         assert_eq!(arena.get(b_id), &"heaven");
         assert_eq!(*arena.get(a_id), 12u16 * 3);
     }
-    
+
     #[test]
     fn arena_alloc_slice() {
         let mut arena = new_arena!();
@@ -606,7 +627,7 @@ mod test {
         arena[id][1] = 3i64;
         assert_eq!(arena[id][1], 3i64);
     }
-    
+
     #[test]
     fn arena_alloc_multiple() {
         let mut arena = new_arena!();
@@ -628,7 +649,7 @@ mod test {
         arena[fruits][0] = "pineapple";
         assert_eq!(arena[fruits][0], "pineapple");
     }
-    
+
     #[test]
     fn arena_alloc_str() {
         let mut arena = new_arena!();

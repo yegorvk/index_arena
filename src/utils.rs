@@ -1,6 +1,6 @@
-use std::mem;
-use std::mem::MaybeUninit;
-use std::ptr::drop_in_place;
+use core::mem;
+use core::mem::MaybeUninit;
+use core::ptr::drop_in_place;
 
 struct Guard<'a, T> {
     slice: &'a mut [MaybeUninit<T>],
@@ -66,7 +66,11 @@ impl<T> MaybeUninitExt<T> for MaybeUninit<T> {
         // unlike copy_from_slice this does not call clone_from_slice on the slice
         // this is because `MaybeUninit<T: Clone>` does not implement Clone.
 
-        assert_eq!(this.len(), src.len(), "destination and source slices have different lengths");
+        assert_eq!(
+            this.len(),
+            src.len(),
+            "destination and source slices have different lengths"
+        );
         // NOTE: We need to explicitly slice them to the same length
         // for bounds checking to be elided, and the optimizer will
         // generate memcpy for simple cases (for example T = u8).
@@ -74,7 +78,10 @@ impl<T> MaybeUninitExt<T> for MaybeUninit<T> {
         let src = &src[..len];
 
         // guard is needed b/c panic might happen during a clone
-        let mut guard = Guard { slice: this, initialized: 0 };
+        let mut guard = Guard {
+            slice: this,
+            initialized: 0,
+        };
 
         for i in 0..len {
             guard.slice[i].write(src[i].clone());

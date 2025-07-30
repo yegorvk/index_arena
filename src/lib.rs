@@ -50,9 +50,12 @@
 //! assert_eq!(&arena[one].next, &Some(two));
 //! ```
 
+#![no_std]
 #![allow(private_bounds)]
 
+#[cfg(feature = "alloc")]
 use aligned_vec::{AVec, ConstAlign};
+
 use core::alloc::Layout;
 use core::fmt::Debug;
 use core::hash::Hash;
@@ -73,39 +76,6 @@ pub trait Storage {
     fn current_byte_offset(&self) -> usize;
     fn as_ptr(&self) -> *const MaybeUninit<u8>;
     fn as_mut_ptr(&mut self) -> *mut MaybeUninit<u8>;
-}
-
-type AVecBytes = AVec<MaybeUninit<u8>, ConstAlign<MAX_ALIGN>>;
-
-impl Storage for AVecBytes {
-    fn alloc_raw(&mut self, len: usize) -> Option<usize> {
-        self.reserve(len);
-
-        let old_len = self.len();
-
-        // SAFETY: `storage.reserve()` didn't panic and length cannot
-        // be less than capacity, so this must not overflow.
-        let new_len = unsafe { old_len.unchecked_add(len) };
-
-        // SAFETY: we have just reserved `additional` bytes.
-        unsafe {
-            self.set_len(new_len);
-        }
-
-        Some(old_len)
-    }
-
-    fn as_ptr(&self) -> *const MaybeUninit<u8> {
-        self.as_ptr()
-    }
-
-    fn as_mut_ptr(&mut self) -> *mut MaybeUninit<u8> {
-        self.as_mut_ptr()
-    }
-
-    fn current_byte_offset(&self) -> usize {
-        self.len()
-    }
 }
 
 macro_rules! assert_const {
@@ -396,6 +366,42 @@ pub struct Arena<A, S> {
     _marker: PhantomData<A>,
 }
 
+#[cfg(feature = "alloc")]
+type AVecBytes = AVec<MaybeUninit<u8>, ConstAlign<MAX_ALIGN>>;
+
+#[cfg(feature = "alloc")]
+impl Storage for AVecBytes {
+    fn alloc_raw(&mut self, len: usize) -> Option<usize> {
+        self.reserve(len);
+
+        let old_len = self.len();
+
+        // SAFETY: `storage.reserve()` didn't panic and length cannot
+        // be less than capacity, so this must not overflow.
+        let new_len = unsafe { old_len.unchecked_add(len) };
+
+        // SAFETY: we have just reserved `additional` bytes.
+        unsafe {
+            self.set_len(new_len);
+        }
+
+        Some(old_len)
+    }
+
+    fn as_ptr(&self) -> *const MaybeUninit<u8> {
+        self.as_ptr()
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut MaybeUninit<u8> {
+        self.as_mut_ptr()
+    }
+
+    fn current_byte_offset(&self) -> usize {
+        self.len()
+    }
+}
+
+#[cfg(feature = "alloc")]
 impl<A> Arena<A, AVecBytes> {
     /// Creates a new, empty arena.
     ///

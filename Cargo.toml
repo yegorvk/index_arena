@@ -13,4 +13,8 @@ exclude = [".idea"]
 
 [dependencies]
 derive-where = "1.2.7"
-aligned-vec = "0.6.1"
+aligned-vec = { version = "0.6.1", optional = true }
+
+[features]
+default = ["alloc"]
+alloc = ["dep:aligned-vec"]

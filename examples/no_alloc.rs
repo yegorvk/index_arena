@@ -42,6 +42,10 @@ impl<'a> Storage for SliceStorage<'a> {
     fn as_mut_ptr(&mut self) -> *mut MaybeUninit<u8> {
         self.bytes.as_mut_ptr()
     }
+
+    fn free_bytes(&self) -> Option<usize> {
+        Some(self.bytes.len() - self.current_byte_offset)
+    }
 }
 
 static STATIC_BUFFER: StaticCell<[MaybeUninit<u8>; 128]> = StaticCell::new();

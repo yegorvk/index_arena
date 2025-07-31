@@ -76,6 +76,8 @@ pub trait Storage {
     fn current_byte_offset(&self) -> usize;
     fn as_ptr(&self) -> *const MaybeUninit<u8>;
     fn as_mut_ptr(&mut self) -> *mut MaybeUninit<u8>;
+
+    fn free_bytes(&self) -> Option<usize>;
 }
 
 macro_rules! assert_const {
@@ -399,6 +401,10 @@ impl Storage for AVecBytes {
     fn current_byte_offset(&self) -> usize {
         self.len()
     }
+
+    fn free_bytes(&self) -> Option<usize> {
+        None
+    }
 }
 
 #[cfg(feature = "alloc")]
@@ -439,6 +445,10 @@ impl<A, S: Storage> Arena<A, S> {
     #[inline]
     pub fn get_mut<T: ?Sized + SpecId<A, S>>(&mut self, id: Id<T, A, S>) -> &mut T {
         id.get_mut(self)
+    }
+
+    pub fn free_bytes(&self) -> Option<usize> {
+        self.storage.free_bytes()
     }
 
     /// Allocates a new value of type `T` in the arena and returns its `Id`.
@@ -776,6 +786,10 @@ mod test_array_storage {
         fn as_mut_ptr(&mut self) -> *mut MaybeUninit<u8> {
             self.bytes.as_mut_ptr()
         }
+
+        fn free_bytes(&self) -> Option<usize> {
+            Some(S - self.current_byte_offset)
+        }
     }
 
     #[test]
@@ -783,6 +797,7 @@ mod test_array_storage {
         let mut arena = new_arena_with_storage!(ArrayStorage::<128>::new());
         let hello = arena.alloc_str("Hello!");
         assert_eq!(&arena[hello], "Hello!");
+        assert_eq!(122, arena.free_bytes().unwrap());
     }
 
     #[test]

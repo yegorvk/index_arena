@@ -1,23 +1,8 @@
-use std::mem;
-use std::mem::MaybeUninit;
-use std::ptr::drop_in_place;
+use core::mem;
+use core::mem::MaybeUninit;
+use core::ptr::drop_in_place;
 
-struct Guard<'a, T> {
-    slice: &'a mut [MaybeUninit<T>],
-    initialized: usize,
-}
-
-impl<'a, T> Drop for Guard<'a, T> {
-    fn drop(&mut self) {
-        let initialized_part = &mut self.slice[..self.initialized];
-        // SAFETY: this raw sub-slice will contain only initialized objects.
-        unsafe {
-            drop_in_place(MaybeUninitExt::slice_assume_init_mut(initialized_part));
-        }
-    }
-}
-
-pub trait MaybeUninitExt<T> {
+pub(crate) trait MaybeUninitExt<T> {
     /// Assuming all the elements are initialized, get a mutable slice to them.
     ///
     /// # Safety
@@ -63,10 +48,30 @@ impl<T> MaybeUninitExt<T> for MaybeUninit<T> {
     where
         T: Clone,
     {
+        struct Guard<'a, T> {
+            slice: &'a mut [MaybeUninit<T>],
+            initialized: usize,
+        }
+
+        impl<'a, T> Drop for Guard<'a, T> {
+            fn drop(&mut self) {
+                let initialized_part = &mut self.slice[..self.initialized];
+                // SAFETY: this raw sub-slice will contain only initialized objects.
+                unsafe {
+                    drop_in_place(MaybeUninitExt::slice_assume_init_mut(initialized_part));
+                }
+            }
+        }
+
         // unlike copy_from_slice this does not call clone_from_slice on the slice
         // this is because `MaybeUninit<T: Clone>` does not implement Clone.
 
-        assert_eq!(this.len(), src.len(), "destination and source slices have different lengths");
+        assert_eq!(
+            this.len(),
+            src.len(),
+            "destination and source slices have different lengths"
+        );
+
         // NOTE: We need to explicitly slice them to the same length
         // for bounds checking to be elided, and the optimizer will
         // generate memcpy for simple cases (for example T = u8).
@@ -74,8 +79,12 @@ impl<T> MaybeUninitExt<T> for MaybeUninit<T> {
         let src = &src[..len];
 
         // guard is needed b/c panic might happen during a clone
-        let mut guard = Guard { slice: this, initialized: 0 };
+        let mut guard = Guard {
+            slice: this,
+            initialized: 0,
+        };
 
+        #[allow(clippy::needless_range_loop)]
         for i in 0..len {
             guard.slice[i].write(src[i].clone());
             guard.initialized += 1;
@@ -86,4 +95,37 @@ impl<T> MaybeUninitExt<T> for MaybeUninit<T> {
         // SAFETY: Valid elements have just been written into `this` so it is initialized
         unsafe { MaybeUninitExt::slice_assume_init_mut(this) }
     }
+}
+
+/// Computes the smallest possible number of bytes that must
+/// be added to `addr` to align it to `align` bytes.
+///
+/// The returned value is always within the range `[0, align)`.
+///
+/// # Safety
+/// `align` must be a power of two.
+#[inline]
+pub(crate) const unsafe fn pad_to_align(addr: usize, align: usize) -> usize {
+    // This function is essentially a simplified version of `core::ptr::align_offset`.
+    // As such, the correctness of this code depends on the correctness of the latter.
+
+    // SAFETY: `align` is a power of two, so it cannot be zero.
+    let align_minus_one = unsafe { align.unchecked_sub(1) };
+
+    // Voodoo magic!
+
+    let aligned_addr = addr.wrapping_add(align_minus_one) & 0usize.wrapping_sub(align);
+    let byte_offset = aligned_addr.wrapping_sub(addr);
+
+    // From `core::ptr::align_offset`:
+    //
+    // Masking by `-align` affects only the low bits, and thus cannot reduce
+    // the value by more than `align - 1`. Therefore, even though intermediate
+    // values might wrap, the `byte_offset` is always within the range `[0, align)`.
+    debug_assert!(byte_offset < align);
+
+    // Correctness check.
+    debug_assert!((addr + byte_offset) % align == 0);
+
+    byte_offset
 }

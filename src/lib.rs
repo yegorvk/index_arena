@@ -328,8 +328,8 @@ impl<T: SpecId<A>, A> From<Id<T, A>> for RawId {
 /// can be relocated to fit more elements (e.g., `Vec<u8>`), later referred to as
 /// the storage buffer. However, since we must support storing arbitrary types,
 /// it has to preserve alignment of elements across relocations. For that
-/// reason, the base address of the buffer must be aligned to `ALIGN` bytes, so
-/// that all alignments up to `ALIGN` are preserved.
+/// reason, the base address of the buffer must be aligned to `MAX_ALIGN` bytes, so
+/// that all alignments up to `MAX_ALIGN` are preserved.
 ///
 /// # Safety
 ///
@@ -352,7 +352,7 @@ impl<T: SpecId<A>, A> From<Id<T, A>> for RawId {
 /// - Storage may only grow (never shrink), and `try_grow` may relocate the buffer,
 ///   invalidating any previous pointers.
 /// - After any relocation, the buffer’s start address **must** remain aligned to
-///   `ALIGN` bytes. This guarantees that elements with alignment ≤ `ALIGN`
+///   `MAX_ALIGN` bytes. This guarantees that elements with alignment ≤ `MAX_ALIGN`
 ///   remain correctly aligned across relocations.
 ///
 /// ## Preservation of contents
@@ -361,7 +361,7 @@ impl<T: SpecId<A>, A> From<Id<T, A>> for RawId {
 /// stored bytes and their order **bit-for-bit**. However, this only
 /// applies to the methods themselves (e.g., `view_mut` returns a
 /// mutable slice, which is fine).
-pub unsafe trait Storage<const ALIGN: usize = MAX_ALIGN> {
+pub unsafe trait Storage {
     type AllocError: Debug;
 
     /// Attempts to increase the storage buffer size by `additional_bytes` bytes.
@@ -383,33 +383,40 @@ pub unsafe trait Storage<const ALIGN: usize = MAX_ALIGN> {
     fn view_mut(&mut self) -> &mut [MaybeUninit<u8>];
 }
 
-pub struct VecStorage<const ALIGN: usize = MAX_ALIGN> {
-    vec: AVec<MaybeUninit<u8>, ConstAlign<ALIGN>>,
+pub struct VecStorage {
+    bytes: AVec<MaybeUninit<u8>, ConstAlign<MAX_ALIGN>>,
 }
 
-impl<const ALIGN: usize> Default for VecStorage<ALIGN> {
+impl VecStorage {
+    #[inline]
+    pub fn new() -> Self {
+        Default::default()
+    }
+}
+
+impl Default for VecStorage {
     #[inline]
     fn default() -> Self {
         Self {
-            vec: AVec::new(ALIGN),
+            bytes: AVec::new(MAX_ALIGN),
         }
     }
 }
 
-unsafe impl<const ALIGN: usize> Storage<ALIGN> for VecStorage<ALIGN> {
+unsafe impl Storage for VecStorage {
     type AllocError = Infallible;
 
     #[inline]
     fn try_grow(&mut self, additional_bytes: usize) -> Result<(), Self::AllocError> {
-        self.vec.reserve(additional_bytes);
+        self.bytes.reserve(additional_bytes);
 
         // SAFETY: `Vec` capacity cannot be less than length.
-        let new_size = unsafe { self.vec.len().unchecked_add(additional_bytes) };
+        let new_size = unsafe { self.bytes.len().unchecked_add(additional_bytes) };
 
         // SAFETY: `MaybeUninit` doesn't require initialization and we have just
         // reserved `additional_bytes` bytes.
         unsafe {
-            self.vec.set_len(new_size);
+            self.bytes.set_len(new_size);
         }
 
         Ok(())
@@ -417,12 +424,75 @@ unsafe impl<const ALIGN: usize> Storage<ALIGN> for VecStorage<ALIGN> {
 
     #[inline]
     fn view(&self) -> &[MaybeUninit<u8>] {
-        self.vec.as_slice()
+        self.bytes.as_slice()
     }
 
     #[inline]
     fn view_mut(&mut self) -> &mut [MaybeUninit<u8>] {
-        self.vec.as_mut_slice()
+        self.bytes.as_mut_slice()
+    }
+}
+
+#[derive(Debug)]
+pub enum SliceStorageError {
+    Overflow,
+    OutOfMemory,
+}
+
+pub struct SliceStorage<'a> {
+    bytes: &'a mut [MaybeUninit<u8>],
+    size: usize,
+}
+
+impl<'a> SliceStorage<'a> {
+    #[inline]
+    pub fn from_unaligned_bytes(
+        bytes: &'a mut [MaybeUninit<u8>],
+    ) -> Result<Self, SliceStorageError> {
+        let padding = unsafe { compute_padding(bytes.as_ptr() as usize, MAX_ALIGN) };
+        let mut storage = SliceStorage { bytes, size: 0 };
+
+        // Ensure we have enough storage to accomodate `padding` bytes.
+        storage.try_grow(padding)?;
+
+        // SAFETY: `try_grow` has succeeded, so this must be safe.
+        storage.bytes = unsafe { storage.bytes.get_unchecked_mut(storage.size..) };
+
+        // Don't forget reset `size`.
+        storage.size = 0;
+
+        Ok(storage)
+    }
+}
+
+unsafe impl Storage for SliceStorage<'_> {
+    type AllocError = SliceStorageError;
+
+    #[inline]
+    fn try_grow(&mut self, additional_bytes: usize) -> Result<(), Self::AllocError> {
+        let new_size = self
+            .size
+            .checked_add(additional_bytes)
+            .ok_or(SliceStorageError::Overflow)?;
+
+        if new_size >= self.bytes.len() {
+            return Err(SliceStorageError::OutOfMemory);
+        }
+
+        // We don't have to initialize `MaybeUninit`.
+        self.size = new_size;
+
+        Ok(())
+    }
+
+    #[inline]
+    fn view(&self) -> &[MaybeUninit<u8>] {
+        unsafe { self.bytes.get_unchecked(0..self.size) }
+    }
+
+    #[inline]
+    fn view_mut(&mut self) -> &mut [MaybeUninit<u8>] {
+        unsafe { self.bytes.get_unchecked_mut(0..self.size) }
     }
 }
 
@@ -434,17 +504,31 @@ unsafe impl<const ALIGN: usize> Storage<ALIGN> for VecStorage<ALIGN> {
 ///
 /// However, this approach has a downside: the arena does not track individual elements,
 /// effectively providing a form of type erasure. As a result, it is not possible to
-/// implement proper dropping of individual elements like in `id_arena::Arena`.
+/// implement proper dropping of individual elements like `id_arena::Arena`.
 pub struct Arena<A, S = VecStorage> {
     storage: S,
     _marker: PhantomData<A>,
+}
+
+impl<A, S> Arena<A, S> {
+    /// Creates a new, empty arena.
+    ///
+    /// # Safety
+    /// The caller must ensure that `A` is only used for this arena.
+    #[inline]
+    pub unsafe fn with_storage(storage: S) -> Self {
+        Arena {
+            storage,
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<A, S: Default> Arena<A, S> {
     /// Creates a new, empty arena.
     ///
     /// # Safety
-    /// The caller must ensure that the `A` type parameter is only used for this arena.
+    /// The caller must ensure that `A` is only used for this arena.
     #[inline]
     pub unsafe fn new() -> Self {
         Arena {
@@ -605,13 +689,13 @@ impl<T: ?Sized + SpecId<A>, A, S: Storage> IndexMut<Id<T, A>> for Arena<A, S> {
 #[macro_export]
 macro_rules! new_arena {
     () => {
-        $crate::new_arena!(Default)
+        $crate::new_arena!(storage = $crate::VecStorage::new())
     };
 
-    ($name:ident) => {{
-        struct $name;
-        // SAFETY: `$name` is unique for each macro invocation.
-        unsafe { $crate::Arena::<$name>::new() }
+    (storage = $storage:expr) => {{
+        struct ArenaMarker;
+        let storage = $storage;
+        unsafe { $crate::Arena::<ArenaMarker, _>::with_storage(storage) }
     }};
 }
 
@@ -724,5 +808,34 @@ mod test {
         let mut arena = new_arena!();
         let hello = arena.alloc_str("Hello!");
         assert_eq!(&arena[hello], "Hello!");
+    }
+
+    #[test]
+    fn arena_alloc_slice_storage() {
+        let mut buf = [MaybeUninit::uninit(); 1024];
+        let storage = SliceStorage::from_unaligned_bytes(&mut buf).unwrap();
+        let mut arena = new_arena!(storage = storage);
+        let counter = arena.alloc(123);
+        let fruits = arena.alloc_slice(&["banana", "orange", "apple"]);
+        assert_eq!(arena[counter], 123);
+        assert_eq!(arena[fruits], ["banana", "orange", "apple"]);
+        arena[counter] = 43;
+        assert_eq!(arena[counter], 43);
+        arena[fruits][0] = "pineapple";
+        assert_eq!(arena[fruits][0], "pineapple");
+        let hello = arena.alloc_str("Hello!");
+        assert_eq!(&arena[hello], "Hello!");
+    }
+
+    #[test]
+    #[should_panic]
+    fn arena_alloc_slice_storage_out_of_memory() {
+        #[repr(align(128))]
+        struct AlignedSlice([MaybeUninit<u8>; 128]);
+        assert!(align_of::<AlignedSlice>() == 128);
+        let mut buf: AlignedSlice = AlignedSlice([MaybeUninit::uninit(); 128]);
+        let storage = SliceStorage::from_unaligned_bytes(&mut buf.0).unwrap();
+        let mut arena = new_arena!(storage = storage);
+        arena.alloc_slice_uninit::<u8>(256);
     }
 }

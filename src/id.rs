@@ -17,16 +17,17 @@ pub struct RawId {
 /// explicitly mutated via a mutable reference obtained from `Arena::get_mut`.
 /// The object associated with this `Id` is guaranteed to have the same lifetime
 /// as the arena itself, meaning it remains valid as long as the arena exists.
-#[derive_where(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[derive_where(Copy, Clone)]
+#[derive_where(Debug, Eq, PartialEq, Hash; T::Id)]
 #[repr(transparent)]
 pub struct Id<T: ?Sized + SpecId<A>, A> {
-    pub(crate) spec: T::Id,
+    pub(crate) id: T::Id,
 }
 
 impl<T: ?Sized + SpecId<A>, A> Id<T, A> {
     #[inline]
-    pub(crate) fn new(spec: T::Id) -> Id<T, A> {
-        Id { spec }
+    pub(crate) fn new(id: T::Id) -> Id<T, A> {
+        Id { id }
     }
 
     // # Safety
@@ -34,9 +35,9 @@ impl<T: ?Sized + SpecId<A>, A> Id<T, A> {
     //  derived from the id (`<T as SpecId<A>>::get_raw_id(id.spec).byte_offset`).
     #[inline]
     pub(crate) unsafe fn get(self, storage_bytes: &[MaybeUninit<u8>]) -> &T {
-        let byte_offset = <T as SpecId<A>>::get_raw_id(self.spec).byte_offset as usize;
+        let byte_offset = <T as SpecId<A>>::get_raw_id(self.id).byte_offset as usize;
         let bytes = unsafe { storage_bytes.get_unchecked(byte_offset..) };
-        unsafe { T::get(bytes, self.spec) }
+        unsafe { T::get(bytes, self.id) }
     }
 
     // # Safety
@@ -44,14 +45,14 @@ impl<T: ?Sized + SpecId<A>, A> Id<T, A> {
     //  derived from the id (`<T as SpecId<A>>::get_raw_id(id.spec).byte_offset`).
     #[inline]
     pub(crate) unsafe fn get_mut(self, storage_bytes: &mut [MaybeUninit<u8>]) -> &mut T {
-        let byte_offset = <T as SpecId<A>>::get_raw_id(self.spec).byte_offset as usize;
+        let byte_offset = <T as SpecId<A>>::get_raw_id(self.id).byte_offset as usize;
         let bytes = unsafe { storage_bytes.get_unchecked_mut(byte_offset..) };
-        unsafe { T::get_mut(bytes, self.spec) }
+        unsafe { T::get_mut(bytes, self.id) }
     }
 
     #[inline]
     pub fn get_raw_id(&self) -> RawId {
-        T::get_raw_id(self.spec)
+        T::get_raw_id(self.id)
     }
 }
 
@@ -163,7 +164,7 @@ impl<A> StrId<A> {
 }
 
 pub(crate) trait SpecId<A> {
-    type Id: Debug + Copy + Clone + Eq + PartialEq + Hash;
+    type Id: Copy;
 
     /// # Safety
     /// There must be a prefix of `bytes` representing the element referred to by `id`.

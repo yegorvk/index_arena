@@ -54,6 +54,7 @@
 #![allow(private_bounds)]
 
 use core::alloc::Layout;
+use core::fmt::Debug;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::ops::{Index, IndexMut};
@@ -140,36 +141,20 @@ impl<A, S: Storage> Arena<A, S> {
         }
 
         // SAFETY: we have just initialized the memory associated with `id`.
-        Ok(unsafe { Id::new(id.spec.assume_init()) })
-    }
-
-    /// Allocates a new value of type `T` in the arena and returns its `Id`.
-    #[inline]
-    pub fn alloc<T>(&mut self, item: T) -> Id<T, A> {
-        self.try_alloc(item).unwrap()
+        Ok(unsafe { Id::new(id.id.assume_init()) })
     }
 
     #[inline]
     pub fn try_alloc_slice<T: Clone>(&mut self, slice: &[T]) -> Result<Id<[T], A>, S::AllocError> {
         let id = self.try_alloc_slice_uninit(slice.len())?;
         <MaybeUninit<T> as MaybeUninitExt<T>>::clone_from_slice(self.get_mut(id), slice);
-        Ok(unsafe { Id::new(id.spec.assume_init()) })
-    }
-
-    #[inline]
-    pub fn alloc_slice<T: Clone>(&mut self, slice: &[T]) -> Id<[T], A> {
-        self.try_alloc_slice(slice).unwrap()
+        Ok(unsafe { Id::new(id.id.assume_init()) })
     }
 
     #[inline]
     pub fn try_alloc_str(&mut self, str: &str) -> Result<Id<str, A>, S::AllocError> {
         let slice = self.try_alloc_slice(str.as_bytes())?;
-        Ok(Id::new(unsafe { StrId::new(slice.spec) }))
-    }
-
-    #[inline]
-    pub fn alloc_str(&mut self, str: &str) -> Id<str, A> {
-        self.try_alloc_str(str).unwrap()
+        Ok(Id::new(unsafe { StrId::new(slice.id) }))
     }
 
     #[inline]
@@ -225,8 +210,30 @@ impl<A, S: Storage> Arena<A, S> {
         // `2 * (isize::MAX as usize)`, which is less than `usize::MAX`.
         let padded_size = unsafe { layout.size().unchecked_add(padding) };
 
-        self.storage.try_grow(padded_size)?;
+        self.storage.try_grow_by(padded_size)?;
         Ok(unsafe { old_size.unchecked_add(padding) })
+    }
+}
+
+impl<A, S> Arena<A, S>
+where
+    S: Storage,
+    S::AllocError: Debug,
+{
+    /// Allocates a new value of type `T` in the arena and returns its `Id`.
+    #[inline]
+    pub fn alloc<T>(&mut self, item: T) -> Id<T, A> {
+        self.try_alloc(item).unwrap()
+    }
+
+    #[inline]
+    pub fn alloc_slice<T: Clone>(&mut self, slice: &[T]) -> Id<[T], A> {
+        self.try_alloc_slice(slice).unwrap()
+    }
+
+    #[inline]
+    pub fn alloc_str(&mut self, str: &str) -> Id<str, A> {
+        self.try_alloc_str(str).unwrap()
     }
 }
 

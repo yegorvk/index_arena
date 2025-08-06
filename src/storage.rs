@@ -41,7 +41,7 @@ use core::{fmt::Debug, mem::MaybeUninit};
 /// applies to the methods themselves (e.g., `view_mut` returns a
 /// mutable slice, which is fine).
 pub unsafe trait Storage {
-    type AllocError: Debug;
+    type AllocError;
 
     /// The alignment of the storage buffer.
     const ALIGN: usize;
@@ -50,7 +50,7 @@ pub unsafe trait Storage {
     ///
     /// If a call to this method succeeds, then `view`/`view_mut` will return slices
     /// with lengths exactly `additional_bytes` greater than before the call.
-    fn try_grow(&mut self, additional_bytes: usize) -> Result<(), Self::AllocError>;
+    fn try_grow_by(&mut self, additional_bytes: usize) -> Result<(), Self::AllocError>;
 
     /// Returns a view of the storage buffer.
     ///
@@ -103,7 +103,7 @@ mod alloc {
         const ALIGN: usize = ALIGN;
 
         #[inline]
-        fn try_grow(&mut self, additional_bytes: usize) -> Result<(), Self::AllocError> {
+        fn try_grow_by(&mut self, additional_bytes: usize) -> Result<(), Self::AllocError> {
             self.bytes.reserve(additional_bytes);
 
             // SAFETY: `Vec` capacity cannot be less than length.
@@ -162,7 +162,7 @@ impl<'a, const ALIGN: usize> SliceStorage<'a, ALIGN> {
         let mut storage = SliceStorage { bytes, size: 0 };
 
         // Ensure we have enough storage to accomodate `padding` bytes.
-        storage.try_grow(padding)?;
+        storage.try_grow_by(padding)?;
 
         // SAFETY: `try_grow` has succeeded, so this must be safe.
         storage.bytes = unsafe { storage.bytes.get_unchecked_mut(storage.size..) };
@@ -179,7 +179,7 @@ unsafe impl<const ALIGN: usize> Storage for SliceStorage<'_, ALIGN> {
     const ALIGN: usize = ALIGN;
 
     #[inline]
-    fn try_grow(&mut self, additional_bytes: usize) -> Result<(), Self::AllocError> {
+    fn try_grow_by(&mut self, additional_bytes: usize) -> Result<(), Self::AllocError> {
         let new_size = self
             .size
             .checked_add(additional_bytes)

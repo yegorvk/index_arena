@@ -51,7 +51,6 @@
 //! ```
 
 #![no_std]
-#![allow(private_bounds)]
 
 use core::alloc::Layout;
 use core::fmt::Debug;
@@ -59,7 +58,6 @@ use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::ops::{Index, IndexMut};
 use core::ptr;
-use id::{SizedId, SliceId, SpecId, StrId};
 use utils::{assert_const, pad_to_align};
 
 use crate::utils::MaybeUninitExt;
@@ -68,7 +66,7 @@ mod id;
 mod storage;
 mod utils;
 
-pub use id::{Id, RawId};
+pub use id::{Id, RawId, SupportedType};
 pub use storage::{SliceStorage, SliceStorageError, Storage};
 
 #[cfg(feature = "alloc")]
@@ -83,82 +81,79 @@ pub use storage::VecStorage;
 /// However, this approach has a downside: the arena does not track individual elements,
 /// effectively providing a form of type erasure. As a result, it is not possible to
 /// implement proper dropping of individual elements like `id_arena::Arena`.
-pub struct Arena<A, S> {
+pub struct Arena<M, S> {
     storage: S,
-    _marker: PhantomData<A>,
+    _tag: PhantomData<M>,
 }
 
-impl<A, S> Arena<A, S> {
+impl<M, S> Arena<M, S> {
     /// Creates a new, empty arena.
     ///
     /// # Safety
-    /// The caller must ensure that `A` is only used for this arena.
+    /// The caller must ensure that `M` is only used for this arena.
     #[inline]
     pub unsafe fn with_storage(storage: S) -> Self {
         Arena {
             storage,
-            _marker: PhantomData,
+            _tag: PhantomData,
         }
     }
 }
 
-impl<A, S: Default> Arena<A, S> {
+impl<M, S: Default> Arena<M, S> {
     /// Creates a new, empty arena.
     ///
     /// # Safety
-    /// The caller must ensure that `A` is only used for this arena.
+    /// The caller must ensure that `M` is only used for this arena.
     #[inline]
     pub unsafe fn new() -> Self {
-        Arena {
-            storage: S::default(),
-            _marker: PhantomData,
-        }
+        unsafe { Arena::with_storage(S::default()) }
     }
 }
 
-impl<A, S: Storage> Arena<A, S> {
+impl<M, S: Storage> Arena<M, S> {
     /// Returns a shared reference to the arena-allocated object associated with given `Id`.
     #[inline]
-    pub fn get<T: ?Sized + SpecId<A>>(&self, id: Id<T, A>) -> &T {
+    pub fn get<T: ?Sized + SupportedType>(&self, id: Id<T, M>) -> &T {
         unsafe { id.get(self.storage.view()) }
     }
 
     /// Returns a mutable reference to the arena-allocated object associated with given `Id`.
     #[inline]
-    pub fn get_mut<T: ?Sized + SpecId<A>>(&mut self, id: Id<T, A>) -> &mut T {
+    pub fn get_mut<T: ?Sized + SupportedType>(&mut self, id: Id<T, M>) -> &mut T {
         unsafe { id.get_mut(self.storage.view_mut()) }
     }
 
     /// Allocates a new value of type `T` in the arena and returns its `Id`.
     #[inline]
-    pub fn try_alloc<T>(&mut self, item: T) -> Result<Id<T, A>, S::AllocError> {
+    pub fn try_alloc<T>(&mut self, item: T) -> Result<Id<T, M>, S::AllocError> {
         // Allocate a new item without initializing it.
-        let id = self.try_alloc_uninit::<T>()?;
+        let uninit_id = self.try_alloc_uninit::<T>()?;
 
         // SAFETY: `MaybeUninit::as_mut_ptr` always returns a valid pointer for `ptr::write`.
         unsafe {
-            ptr::write(self.get_mut(id).as_mut_ptr(), item);
+            ptr::write(self.get_mut(uninit_id).as_mut_ptr(), item);
         }
 
         // SAFETY: we have just initialized the memory associated with `id`.
-        Ok(unsafe { Id::new(id.id.assume_init()) })
+        Ok(unsafe { uninit_id.assume_init() })
     }
 
     #[inline]
-    pub fn try_alloc_slice<T: Clone>(&mut self, slice: &[T]) -> Result<Id<[T], A>, S::AllocError> {
-        let id = self.try_alloc_slice_uninit(slice.len())?;
-        <MaybeUninit<T> as MaybeUninitExt<T>>::clone_from_slice(self.get_mut(id), slice);
-        Ok(unsafe { Id::new(id.id.assume_init()) })
+    pub fn try_alloc_slice<T: Clone>(&mut self, slice: &[T]) -> Result<Id<[T], M>, S::AllocError> {
+        let uninit_id = self.try_alloc_slice_uninit(slice.len())?;
+        <MaybeUninit<T> as MaybeUninitExt<T>>::clone_from_slice(self.get_mut(uninit_id), slice);
+        Ok(unsafe { uninit_id.assume_init() })
     }
 
     #[inline]
-    pub fn try_alloc_str(&mut self, str: &str) -> Result<Id<str, A>, S::AllocError> {
-        let slice = self.try_alloc_slice(str.as_bytes())?;
-        Ok(Id::new(unsafe { StrId::new(slice.id) }))
+    pub fn try_alloc_str(&mut self, str: &str) -> Result<Id<str, M>, S::AllocError> {
+        let slice_id = self.try_alloc_slice(str.as_bytes())?;
+        Ok(unsafe { Id::new_str(slice_id) })
     }
 
     #[inline]
-    fn try_alloc_uninit<T>(&mut self) -> Result<Id<MaybeUninit<T>, A>, S::AllocError> {
+    fn try_alloc_uninit<T>(&mut self) -> Result<Id<MaybeUninit<T>, M>, S::AllocError> {
         assert_const!(align_of::<T>() <= S::ALIGN && size_of::<T>() != 0);
 
         // SAFETY: `align_of::<T>` cannot exceed `S::ALIGN`.
@@ -167,14 +162,14 @@ impl<A, S: Storage> Arena<A, S> {
         // SAFETY: the memory location at `byte_offset` is properly
         // aligned to hold a value of type `T` and `MaybeUninit`
         // does not require initialization.
-        Ok(unsafe { Id::new(SizedId::new(byte_offset)) })
+        Ok(unsafe { Id::new_sized(byte_offset) })
     }
 
     #[inline]
     fn try_alloc_slice_uninit<T>(
         &mut self,
         len: usize,
-    ) -> Result<Id<[MaybeUninit<T>], A>, S::AllocError> {
+    ) -> Result<Id<[MaybeUninit<T>], M>, S::AllocError> {
         assert_const!(align_of::<T>() <= S::ALIGN && size_of::<T>() != 0);
 
         let layout = Layout::array::<T>(len).unwrap();
@@ -186,7 +181,7 @@ impl<A, S: Storage> Arena<A, S> {
         // SAFETY: the memory location at `byte_offset` is properly
         // aligned to hold a value of type `[T; len]` and `MaybeUninit`
         // does not require initialization.
-        Ok(unsafe { Id::new(SliceId::new(byte_offset, len)) })
+        Ok(unsafe { Id::new_slice(byte_offset, len) })
     }
 
     /// Allocates uninitialized memory suitable to hold a value with the given layout
@@ -215,48 +210,48 @@ impl<A, S: Storage> Arena<A, S> {
     }
 }
 
-impl<A, S> Arena<A, S>
+impl<M, S> Arena<M, S>
 where
     S: Storage,
     S::AllocError: Debug,
 {
     /// Allocates a new value of type `T` in the arena and returns its `Id`.
     #[inline]
-    pub fn alloc<T>(&mut self, item: T) -> Id<T, A> {
+    pub fn alloc<T>(&mut self, item: T) -> Id<T, M> {
         self.try_alloc(item).unwrap()
     }
 
     #[inline]
-    pub fn alloc_slice<T: Clone>(&mut self, slice: &[T]) -> Id<[T], A> {
+    pub fn alloc_slice<T: Clone>(&mut self, slice: &[T]) -> Id<[T], M> {
         self.try_alloc_slice(slice).unwrap()
     }
 
     #[inline]
-    pub fn alloc_str(&mut self, str: &str) -> Id<str, A> {
+    pub fn alloc_str(&mut self, str: &str) -> Id<str, M> {
         self.try_alloc_str(str).unwrap()
     }
 }
 
-impl<T, A, S> Index<Id<T, A>> for Arena<A, S>
+impl<T, M, S> Index<Id<T, M>> for Arena<M, S>
 where
-    T: ?Sized + SpecId<A>,
+    T: ?Sized + SupportedType,
     S: Storage,
 {
     type Output = T;
 
     #[inline]
-    fn index(&self, id: Id<T, A>) -> &Self::Output {
+    fn index(&self, id: Id<T, M>) -> &Self::Output {
         self.get(id)
     }
 }
 
-impl<T, A, S> IndexMut<Id<T, A>> for Arena<A, S>
+impl<T, M, S> IndexMut<Id<T, M>> for Arena<M, S>
 where
-    T: ?Sized + SpecId<A>,
+    T: ?Sized + SupportedType,
     S: Storage,
 {
     #[inline]
-    fn index_mut(&mut self, id: Id<T, A>) -> &mut Self::Output {
+    fn index_mut(&mut self, id: Id<T, M>) -> &mut Self::Output {
         self.get_mut(id)
     }
 }
@@ -268,21 +263,22 @@ pub const DEFAULT_STORAGE_ALIGN: usize = 128;
 macro_rules! new_arena {
     () => {{
         const ALIGN: usize = $crate::DEFAULT_STORAGE_ALIGN;
-        $crate::new_arena!(storage = $crate::VecStorage::<ALIGN>::new())
+        let storage = $crate::VecStorage::<ALIGN>::new();
+        $crate::new_arena!(storage = storage)
     }};
 
     (storage = $storage:expr) => {{
-        struct ArenaMarker;
+        struct M;
         let storage = $storage;
-        unsafe { $crate::Arena::<ArenaMarker, _>::with_storage(storage) }
+        unsafe { $crate::Arena::<M, _>::with_storage(storage) }
     }};
 }
 
 #[cfg(test)]
 mod test {
-    use crate::storage::SliceStorage;
-
     use super::*;
+
+    use crate::storage::SliceStorage;
 
     #[test]
     fn arena_alloc_one_u8() {

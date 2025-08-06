@@ -1,4 +1,3 @@
-use crate::{assert_const, MAX_ALIGN};
 use core::{fmt::Debug, hash::Hash, marker::PhantomData, mem::MaybeUninit, slice};
 use derive_where::derive_where;
 
@@ -21,32 +20,38 @@ pub struct RawId {
 #[derive_where(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 #[repr(transparent)]
 pub struct Id<T: ?Sized + SpecId<A>, A> {
-    pub(crate) id: T::Id,
+    pub(crate) spec: T::Id,
 }
 
 impl<T: ?Sized + SpecId<A>, A> Id<T, A> {
     #[inline]
     pub(crate) fn new(spec: T::Id) -> Id<T, A> {
-        Id { id: spec }
+        Id { spec }
     }
 
+    // # Safety
+    // `storage_bytes` must contain a valid value of type `T` at the byte offset
+    //  derived from the id (`<T as SpecId<A>>::get_raw_id(id.spec).byte_offset`).
     #[inline]
-    pub(crate) fn get(self, storage_view: &[MaybeUninit<u8>]) -> &T {
-        let byte_offset = <T as SpecId<A>>::get_raw_id(self.id).byte_offset as usize;
-        let bytes = unsafe { storage_view.get_unchecked(byte_offset..) };
-        unsafe { T::get(bytes, self.id) }
+    pub(crate) unsafe fn get(self, storage_bytes: &[MaybeUninit<u8>]) -> &T {
+        let byte_offset = <T as SpecId<A>>::get_raw_id(self.spec).byte_offset as usize;
+        let bytes = unsafe { storage_bytes.get_unchecked(byte_offset..) };
+        unsafe { T::get(bytes, self.spec) }
     }
 
+    // # Safety
+    // `storage_bytes` must contain a valid value of type `T` at the byte offset
+    //  derived from the id (`<T as SpecId<A>>::get_raw_id(id.spec).byte_offset`).
     #[inline]
-    pub(crate) fn get_mut(self, storage_view: &mut [MaybeUninit<u8>]) -> &mut T {
-        let byte_offset = <T as SpecId<A>>::get_raw_id(self.id).byte_offset as usize;
-        let bytes = unsafe { storage_view.get_unchecked_mut(byte_offset..) };
-        unsafe { T::get_mut(bytes, self.id) }
+    pub(crate) unsafe fn get_mut(self, storage_bytes: &mut [MaybeUninit<u8>]) -> &mut T {
+        let byte_offset = <T as SpecId<A>>::get_raw_id(self.spec).byte_offset as usize;
+        let bytes = unsafe { storage_bytes.get_unchecked_mut(byte_offset..) };
+        unsafe { T::get_mut(bytes, self.spec) }
     }
 
     #[inline]
     pub fn get_raw_id(&self) -> RawId {
-        T::get_raw_id(self.id)
+        T::get_raw_id(self.spec)
     }
 }
 
@@ -176,7 +181,6 @@ impl<T, A> SpecId<A> for T {
 
     #[inline]
     unsafe fn get(bytes: &[MaybeUninit<u8>], _id: Self::Id) -> &Self {
-        assert_const!(size_of::<T>() != 0 && align_of::<T>() <= MAX_ALIGN);
         debug_assert!((bytes.as_ptr() as usize) % align_of::<T>() == 0);
         let ptr: *const T = bytes.as_ptr().cast();
         unsafe { &*ptr }
@@ -184,7 +188,6 @@ impl<T, A> SpecId<A> for T {
 
     #[inline]
     unsafe fn get_mut(bytes: &mut [MaybeUninit<u8>], _id: Self::Id) -> &mut Self {
-        assert_const!(size_of::<T>() != 0 && align_of::<T>() <= MAX_ALIGN);
         debug_assert!((bytes.as_ptr() as usize) % align_of::<T>() == 0);
         let ptr: *mut T = bytes.as_mut_ptr().cast();
         unsafe { &mut *ptr }
@@ -202,13 +205,11 @@ impl<T, A> SpecId<A> for [T] {
     type Id = SliceId<T, A>;
 
     unsafe fn get(bytes: &[MaybeUninit<u8>], id: Self::Id) -> &Self {
-        assert_const!(size_of::<T>() != 0 && align_of::<T>() <= MAX_ALIGN);
         debug_assert!((bytes.as_ptr() as usize) % align_of::<T>() == 0);
         unsafe { slice::from_raw_parts(bytes.as_ptr().cast(), id.len as usize) }
     }
 
     unsafe fn get_mut(bytes: &mut [MaybeUninit<u8>], id: Self::Id) -> &mut Self {
-        assert_const!(size_of::<T>() != 0 && align_of::<T>() <= MAX_ALIGN);
         debug_assert!((bytes.as_ptr() as usize) % align_of::<T>() == 0);
         unsafe { slice::from_raw_parts_mut(bytes.as_mut_ptr().cast(), id.len as usize) }
     }

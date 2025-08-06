@@ -1,4 +1,4 @@
-use crate::{pad_to_align, MAX_ALIGN};
+use crate::{utils::pad_to_align, DEFAULT_STORAGE_ALIGN};
 use core::{fmt::Debug, mem::MaybeUninit};
 
 /// A storage backend for `Arena`.
@@ -7,8 +7,8 @@ use core::{fmt::Debug, mem::MaybeUninit};
 /// can be relocated to fit more elements (e.g., `Vec<u8>`), later referred to as
 /// the storage buffer. However, since we must support storing arbitrary types,
 /// it has to preserve alignment of elements across relocations. For that
-/// reason, the base address of the buffer must be aligned to `MAX_ALIGN` bytes, so
-/// that all alignments up to `MAX_ALIGN` are preserved.
+/// reason, the base address of the buffer must be aligned to `ALIGN` bytes, so
+/// that all alignments up to `ALIGN` are preserved.
 ///
 /// # Safety
 ///
@@ -31,7 +31,7 @@ use core::{fmt::Debug, mem::MaybeUninit};
 /// - Storage may only grow (never shrink), and `try_grow` may relocate the buffer,
 ///   invalidating any previous pointers.
 /// - After any relocation, the buffer’s start address **must** remain aligned to
-///   `MAX_ALIGN` bytes. This guarantees that elements with alignment ≤ `MAX_ALIGN`
+///   `ALIGN` bytes. This guarantees that elements with alignment ≤ `ALIGN`
 ///   remain correctly aligned across relocations.
 ///
 /// ## Preservation of contents
@@ -42,6 +42,9 @@ use core::{fmt::Debug, mem::MaybeUninit};
 /// mutable slice, which is fine).
 pub unsafe trait Storage {
     type AllocError: Debug;
+
+    /// The alignment of the storage buffer.
+    const ALIGN: usize;
 
     /// Attempts to increase the storage buffer size by `additional_bytes` bytes.
     ///
@@ -68,28 +71,36 @@ mod alloc {
     use aligned_vec::{AVec, ConstAlign};
     use core::convert::Infallible;
 
-    pub struct VecStorage {
-        bytes: AVec<MaybeUninit<u8>, ConstAlign<MAX_ALIGN>>,
+    pub struct VecStorage<const ALIGN: usize = DEFAULT_STORAGE_ALIGN> {
+        bytes: AVec<MaybeUninit<u8>, ConstAlign<ALIGN>>,
     }
 
     impl VecStorage {
         #[inline]
         pub fn new() -> Self {
+            Self::new_align()
+        }
+    }
+
+    impl<const ALIGN: usize> VecStorage<ALIGN> {
+        #[inline]
+        pub fn new_align() -> Self {
             Default::default()
         }
     }
 
-    impl Default for VecStorage {
+    impl<const ALIGN: usize> Default for VecStorage<ALIGN> {
         #[inline]
         fn default() -> Self {
             Self {
-                bytes: AVec::new(MAX_ALIGN),
+                bytes: AVec::new(ALIGN),
             }
         }
     }
 
-    unsafe impl Storage for VecStorage {
+    unsafe impl<const ALIGN: usize> Storage for VecStorage<ALIGN> {
         type AllocError = Infallible;
+        const ALIGN: usize = ALIGN;
 
         #[inline]
         fn try_grow(&mut self, additional_bytes: usize) -> Result<(), Self::AllocError> {
@@ -128,7 +139,7 @@ pub enum SliceStorageError {
     OutOfMemory,
 }
 
-pub struct SliceStorage<'a> {
+pub struct SliceStorage<'a, const ALIGN: usize = DEFAULT_STORAGE_ALIGN> {
     bytes: &'a mut [MaybeUninit<u8>],
     size: usize,
 }
@@ -138,7 +149,16 @@ impl<'a> SliceStorage<'a> {
     pub fn from_unaligned_bytes(
         bytes: &'a mut [MaybeUninit<u8>],
     ) -> Result<Self, SliceStorageError> {
-        let padding = unsafe { pad_to_align(bytes.as_ptr() as usize, MAX_ALIGN) };
+        Self::from_unaligned_bytes_align(bytes)
+    }
+}
+
+impl<'a, const ALIGN: usize> SliceStorage<'a, ALIGN> {
+    #[inline]
+    pub fn from_unaligned_bytes_align(
+        bytes: &'a mut [MaybeUninit<u8>],
+    ) -> Result<Self, SliceStorageError> {
+        let padding = unsafe { pad_to_align(bytes.as_ptr() as usize, ALIGN) };
         let mut storage = SliceStorage { bytes, size: 0 };
 
         // Ensure we have enough storage to accomodate `padding` bytes.
@@ -154,8 +174,9 @@ impl<'a> SliceStorage<'a> {
     }
 }
 
-unsafe impl Storage for SliceStorage<'_> {
+unsafe impl<const ALIGN: usize> Storage for SliceStorage<'_, ALIGN> {
     type AllocError = SliceStorageError;
+    const ALIGN: usize = ALIGN;
 
     #[inline]
     fn try_grow(&mut self, additional_bytes: usize) -> Result<(), Self::AllocError> {

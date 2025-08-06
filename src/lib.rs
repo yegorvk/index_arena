@@ -59,7 +59,7 @@ use core::mem::MaybeUninit;
 use core::ops::{Index, IndexMut};
 use core::ptr;
 use id::{SizedId, SliceId, SpecId, StrId};
-use utils::pad_to_align;
+use utils::{assert_const, pad_to_align};
 
 use crate::utils::MaybeUninitExt;
 
@@ -72,25 +72,6 @@ pub use storage::{SliceStorage, SliceStorageError, Storage};
 
 #[cfg(feature = "alloc")]
 pub use storage::VecStorage;
-
-macro_rules! assert_const {
-    ($cond:expr, $($arg:tt)+) => {
-        if const { !$cond } {
-            assert!($cond, $($arg)+);
-        }
-    };
-
-    ($cond:expr $(,)?) => {
-        if const { !$cond } {
-            assert!($cond);
-        }
-    };
-}
-
-pub(crate) use assert_const;
-
-/// The maximum alignment in bytes supported by `Arena`.
-pub const MAX_ALIGN: usize = 128;
 
 /// A simple heterogeneous arena allocator inspired by the `id_arena` crate.
 ///
@@ -134,20 +115,17 @@ impl<A, S: Default> Arena<A, S> {
     }
 }
 
-impl<A, S> Arena<A, S>
-where
-    S: Storage,
-{
+impl<A, S: Storage> Arena<A, S> {
     /// Returns a shared reference to the arena-allocated object associated with given `Id`.
     #[inline]
     pub fn get<T: ?Sized + SpecId<A>>(&self, id: Id<T, A>) -> &T {
-        id.get(self.storage.view())
+        unsafe { id.get(self.storage.view()) }
     }
 
     /// Returns a mutable reference to the arena-allocated object associated with given `Id`.
     #[inline]
     pub fn get_mut<T: ?Sized + SpecId<A>>(&mut self, id: Id<T, A>) -> &mut T {
-        id.get_mut(self.storage.view_mut())
+        unsafe { id.get_mut(self.storage.view_mut()) }
     }
 
     /// Allocates a new value of type `T` in the arena and returns its `Id`.
@@ -162,7 +140,7 @@ where
         }
 
         // SAFETY: we have just initialized the memory associated with `id`.
-        Ok(unsafe { Id::new(id.id.assume_init()) })
+        Ok(unsafe { Id::new(id.spec.assume_init()) })
     }
 
     /// Allocates a new value of type `T` in the arena and returns its `Id`.
@@ -175,7 +153,7 @@ where
     pub fn try_alloc_slice<T: Clone>(&mut self, slice: &[T]) -> Result<Id<[T], A>, S::AllocError> {
         let id = self.try_alloc_slice_uninit(slice.len())?;
         <MaybeUninit<T> as MaybeUninitExt<T>>::clone_from_slice(self.get_mut(id), slice);
-        Ok(unsafe { Id::new(id.id.assume_init()) })
+        Ok(unsafe { Id::new(id.spec.assume_init()) })
     }
 
     #[inline]
@@ -186,7 +164,7 @@ where
     #[inline]
     pub fn try_alloc_str(&mut self, str: &str) -> Result<Id<str, A>, S::AllocError> {
         let slice = self.try_alloc_slice(str.as_bytes())?;
-        Ok(Id::new(unsafe { StrId::new(slice.id) }))
+        Ok(Id::new(unsafe { StrId::new(slice.spec) }))
     }
 
     #[inline]
@@ -196,9 +174,9 @@ where
 
     #[inline]
     fn try_alloc_uninit<T>(&mut self) -> Result<Id<MaybeUninit<T>, A>, S::AllocError> {
-        assert_const!(align_of::<T>() <= MAX_ALIGN && size_of::<T>() != 0);
+        assert_const!(align_of::<T>() <= S::ALIGN && size_of::<T>() != 0);
 
-        // SAFETY: `align_of::<T>` cannot exceed `MAX_ALIGN`.
+        // SAFETY: `align_of::<T>` cannot exceed `S::ALIGN`.
         let byte_offset = unsafe { self.try_alloc_layout(Layout::new::<T>())? };
 
         // SAFETY: the memory location at `byte_offset` is properly
@@ -212,12 +190,12 @@ where
         &mut self,
         len: usize,
     ) -> Result<Id<[MaybeUninit<T>], A>, S::AllocError> {
-        assert_const!(align_of::<T>() <= MAX_ALIGN && size_of::<T>() != 0);
+        assert_const!(align_of::<T>() <= S::ALIGN && size_of::<T>() != 0);
 
         let layout = Layout::array::<T>(len).unwrap();
 
         // SAFETY: the alignment of an array is the same as the alignment of
-        // its elements and `align_of::<T>` cannot exceed `MAX_ALIGN`.
+        // its elements and `align_of::<T>` cannot exceed `S::ALIGN`.
         let byte_offset = unsafe { self.try_alloc_layout(layout)? };
 
         // SAFETY: the memory location at `byte_offset` is properly
@@ -230,13 +208,13 @@ where
     /// and returns the index of the beginning of the allocation.
     ///
     /// # Safety
-    /// `layout.size()` must not be zero and `layout.align()` must not exceed `MAX_ALIGN`.
+    /// `layout.size()` must not be zero and `layout.align()` must not exceed `S::ALIGN`.
     #[inline]
     unsafe fn try_alloc_layout(&mut self, layout: Layout) -> Result<usize, S::AllocError> {
         let old_size = self.storage.view().len();
 
-        // Since the backing storage is aligned to `MAX_ALIGN` and
-        // `layout.align() <= MAX_ALIGN`, we only need to ensure that
+        // Since the backing storage is aligned to `S::ALIGN` and
+        // `layout.align() <= S::ALIGN`, we only need to ensure that
         // the start of the new allocation is aligned to `layout.align()`.
         // SAFETY: `layout.align()` is guaranteed to be a power of two.
         let padding = unsafe { pad_to_align(old_size, layout.align()) };
@@ -252,7 +230,11 @@ where
     }
 }
 
-impl<T: ?Sized + SpecId<A>, A, S: Storage> Index<Id<T, A>> for Arena<A, S> {
+impl<T, A, S> Index<Id<T, A>> for Arena<A, S>
+where
+    T: ?Sized + SpecId<A>,
+    S: Storage,
+{
     type Output = T;
 
     #[inline]
@@ -261,18 +243,26 @@ impl<T: ?Sized + SpecId<A>, A, S: Storage> Index<Id<T, A>> for Arena<A, S> {
     }
 }
 
-impl<T: ?Sized + SpecId<A>, A, S: Storage> IndexMut<Id<T, A>> for Arena<A, S> {
+impl<T, A, S> IndexMut<Id<T, A>> for Arena<A, S>
+where
+    T: ?Sized + SpecId<A>,
+    S: Storage,
+{
     #[inline]
     fn index_mut(&mut self, id: Id<T, A>) -> &mut Self::Output {
         self.get_mut(id)
     }
 }
 
+#[doc(hidden)]
+pub const DEFAULT_STORAGE_ALIGN: usize = 128;
+
 #[macro_export]
 macro_rules! new_arena {
-    () => {
-        $crate::new_arena!(storage = $crate::VecStorage::new())
-    };
+    () => {{
+        const ALIGN: usize = $crate::DEFAULT_STORAGE_ALIGN;
+        $crate::new_arena!(storage = $crate::VecStorage::<ALIGN>::new())
+    }};
 
     (storage = $storage:expr) => {{
         struct ArenaMarker;

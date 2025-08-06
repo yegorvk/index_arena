@@ -2,6 +2,22 @@ use core::mem;
 use core::mem::MaybeUninit;
 use core::ptr::drop_in_place;
 
+macro_rules! assert_const {
+    ($cond:expr, $($arg:tt)+) => {
+        if const { !$cond } {
+            assert!($cond, $($arg)+);
+        }
+    };
+
+    ($cond:expr $(,)?) => {
+        if const { !$cond } {
+            assert!($cond);
+        }
+    };
+}
+
+pub(crate) use assert_const;
+
 pub(crate) trait MaybeUninitExt<T> {
     /// Assuming all the elements are initialized, get a mutable slice to them.
     ///

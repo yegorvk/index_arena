@@ -14,7 +14,7 @@
 //!
 //! ## Heterogeneous
 //!
-//! Supports allocating values of all statically sized, non-ZST types as well slices and string slices.
+//! Supports allocating values of all `Sized` types as well slices and strings.
 //! This is particularly useful for managing tree-like data structures
 //! with different node types.
 //!
@@ -25,8 +25,8 @@
 //!
 //! ## No `Drop`
 //!
-//! This design, however, has one downside: the arena does not know about individual objects
-//! it contains, which makes it impossible to run their destructors on `drop`.
+//! Due to the way this crate works, the arena cannot track individual allocations,
+//! so it doesn't drop its elements, which is a necessary trade off.
 //!
 //! ## Examples
 //!
@@ -154,7 +154,12 @@ impl<M, S: Storage> Arena<M, S> {
 
     #[inline]
     fn try_alloc_uninit<T>(&mut self) -> Result<Id<MaybeUninit<T>, M>, S::AllocError> {
-        assert_const!(align_of::<T>() <= S::ALIGN && size_of::<T>() != 0);
+        assert_const!(align_of::<T>() <= S::ALIGN);
+
+        if const { size_of::<T>() == 0 } {
+            // SAFETY: `byte_offset` can be any value for ZSTs.
+            return unsafe { Ok(Id::new_sized(0)) };
+        }
 
         // SAFETY: `align_of::<T>` cannot exceed `S::ALIGN`.
         let byte_offset = unsafe { self.try_alloc_layout(Layout::new::<T>())? };
@@ -170,7 +175,12 @@ impl<M, S: Storage> Arena<M, S> {
         &mut self,
         len: usize,
     ) -> Result<Id<[MaybeUninit<T>], M>, S::AllocError> {
-        assert_const!(align_of::<T>() <= S::ALIGN && size_of::<T>() != 0);
+        assert_const!(align_of::<T>() <= S::ALIGN);
+
+        if const { size_of::<T>() == 0 } {
+            // SAFETY: `byte_offset` can be any value for ZSTs.
+            return unsafe { Ok(Id::new_slice(0, len)) };
+        }
 
         let layout = Layout::array::<T>(len).unwrap();
 
@@ -425,5 +435,14 @@ mod test {
         let storage = SliceStorage::from_unaligned_bytes(&mut buf.0).unwrap();
         let mut arena = new_arena!(storage = storage);
         assert!(arena.try_alloc_slice(&[0; 256]).is_err());
+    }
+
+    #[test]
+    fn arena_alloc_zst() {
+        let mut arena = new_arena!();
+        let a = arena.alloc(());
+        let _ = arena.get(a);
+        let b = arena.alloc_slice(&[(); 1024]);
+        let _ = arena.get(b);
     }
 }

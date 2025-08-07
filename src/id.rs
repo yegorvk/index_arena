@@ -134,7 +134,7 @@ struct SizedId<T, M> {
     // Invariant: `byte_offset` always represents a valid location
     // within the arena holding a value of type `T`, provided `size_of::<T>() > 0`.
     byte_offset: u32,
-    _marker: PhantomData<(T, M)>,
+    _marker: PhantomData<fn() -> (T, M)>,
 }
 
 impl<T, M> SizedId<T, M> {
@@ -171,9 +171,11 @@ impl<T, M> SizedId<MaybeUninit<T>, M> {
 /// All the guarantees `Id` makes also apply for this type.
 #[derive_where(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 struct SliceId<T, M> {
+    // Invariant: `byte_offset` always represents a valid location
+    // within the arena holding a value of type `[T]`, provided `size_of::<T>() > 0`.
     byte_offset: u32,
     len: u32,
-    _marker: PhantomData<(T, M)>,
+    _marker: PhantomData<fn() -> (T, M)>,
 }
 
 impl<T, M> SliceId<T, M> {
@@ -237,14 +239,14 @@ impl<T> SpecId for T {
 
     #[inline]
     unsafe fn get<'a, M>(_id: &Self::Id<M>, bytes: &'a [MaybeUninit<u8>]) -> &'a Self {
-        debug_assert!((bytes.as_ptr() as usize) % align_of::<T>() == 0);
+        debug_assert!(size_of::<T>() == 0 || (bytes.as_ptr() as usize) % align_of::<T>() == 0);
         let ptr: *const T = bytes.as_ptr().cast();
         unsafe { &*ptr }
     }
 
     #[inline]
     unsafe fn get_mut<'a, M>(_id: &Self::Id<M>, bytes: &'a mut [MaybeUninit<u8>]) -> &'a mut Self {
-        debug_assert!((bytes.as_ptr() as usize) % align_of::<T>() == 0);
+        debug_assert!(size_of::<T>() == 0 || (bytes.as_ptr() as usize) % align_of::<T>() == 0);
         let ptr: *mut T = bytes.as_mut_ptr().cast();
         unsafe { &mut *ptr }
     }

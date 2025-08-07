@@ -25,7 +25,8 @@ system, achieving safety with almost no runtime checks.
 ## No `Drop`
 
 Due to the way this crate works, the arena cannot track individual allocations,
-so it doesn't drop its elements, which is a necessary trade off.
+so it doesn't drop its elements. This is a necessary trade off between
+memory usage and element tracking.
 
 ## Examples
 
@@ -48,4 +49,3 @@ let one = arena.alloc(Odd { next: Some(two) });
 
 assert_eq!(&arena[one].next, &Some(two));
 ```
-

@@ -14,5 +14,5 @@ categories = ["memory-management", "rust-patterns"]
 alloc = ["dep:aligned-vec"]
 
 [dependencies]
-derive-where = "1.2.7"
-aligned-vec = { version = "0.6.1", optional = true }
+derive-where = "1.6.0"
+aligned-vec = { version = "0.6.4", optional = true }
